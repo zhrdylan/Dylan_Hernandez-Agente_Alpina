@@ -33,8 +33,8 @@ async function checkHealthAndStats() {
   try {
     const health = await api("/health");
     if (statusEl) {
-      if (health.agent_ready) {
-        statusEl.innerHTML = `<i data-lucide="check-circle" class="ui-icon" style="color:var(--green); width:13px; height:13px;"></i> <span>Conectado (Semántico)</span>`;
+      if (health.status === "ok") {
+        statusEl.innerHTML = `<i data-lucide="check-circle" class="ui-icon" style="color:var(--green); width:13px; height:13px;"></i> <span>Servicio disponible</span>`;
         statusEl.classList.add("ready");
       } else {
         statusEl.innerHTML = `<i data-lucide="loader-2" class="ui-icon spin" style="width:13px; height:13px;"></i> <span>Iniciando...</span>`;
@@ -111,10 +111,14 @@ async function selectChat(chatId) {
 
   try {
     const messages = await api(`/api/chats/${chatId}/messages`);
+    // Descartar si el usuario cambió a otro chat antes de que este fetch terminara (R11)
+    if (state.activeChatId !== chatId) return;
     state.messages = messages;
     renderMessages(messages, handleAsk);
   } catch (err) {
-    console.error("Error al obtener mensajes:", err);
+    if (state.activeChatId === chatId) {
+      console.error("Error al obtener mensajes:", err);
+    }
   }
 }
 
@@ -152,6 +156,9 @@ function initComposer() {
 async function handleAsk(content) {
   if (!content || state.isSending) return;
   state.isSending = true;
+  const input = document.getElementById("message-input");
+  const submitBtn = document.querySelector("#composer button[type='submit']");
+  if (submitBtn) submitBtn.disabled = true;
 
   try {
     // Si no hay chat activo, crear uno dentro del bloque protegido (F16)
@@ -201,9 +208,19 @@ async function handleAsk(content) {
     renderChatList(chats);
   } catch (err) {
     hideTypingIndicator();
+    // Conservar borrador tras fallo y limpiar mensaje optimista huérfano (R11)
+    if (input) {
+      input.value = content;
+      storage.session.setComposerDraft(content);
+    }
+    if (state.messages.length > 0 && state.messages[state.messages.length - 1].role === "user") {
+      state.messages.pop();
+      renderMessages(state.messages, handleAsk);
+    }
     alert(`Error del agente: ${err.message}`);
   } finally {
     state.isSending = false;
+    if (submitBtn) submitBtn.disabled = false;
   }
 }
 

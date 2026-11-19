@@ -70,3 +70,18 @@ def test_chat_internal_error_redacted(client):
         detail = res.json()["detail"]
         assert "postgres://secret@aws" not in detail
         assert "Error al procesar la consulta con el agente" in detail
+
+
+def test_r11_ui_static_files_served_and_contract_guarantees(client):
+    """R11: Static JS and UI entrypoints must be accessible and contain resilience logic."""
+    res = client.get("/static/js/main.js")
+    assert res.status_code == 200
+    content = res.text
+    # Check race condition guard
+    assert "state.activeChatId !== chatId" in content
+    # Check draft preservation on error
+    assert "storage.session.setComposerDraft" in content
+    assert "state.messages.pop()" in content
+    # Check double submission guard
+    assert "submitBtn.disabled = true" in content
+

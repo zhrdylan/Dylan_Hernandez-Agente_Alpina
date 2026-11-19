@@ -54,7 +54,7 @@ def list_chats(session_id: str = Depends(get_current_session_id)) -> list[dict]:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                select id::text as id, title, user_id, session_id, created_at, updated_at
+                select id::text as id, title, created_at, updated_at
                 from public.chats
                 where session_id = %s
                 order by updated_at desc
@@ -85,7 +85,7 @@ def create_chat(
                 """
                 insert into public.chats (title, user_id, session_id)
                 values (%s, %s, %s)
-                returning id::text as id, title, user_id, session_id, created_at, updated_at
+                returning id::text as id, title, created_at, updated_at
                 """,
                 (enc_title, target_user, session_id),
             )
@@ -135,7 +135,7 @@ def list_messages(
                        metadata, created_at
                 from public.messages
                 where chat_id = %s
-                order by created_at asc, id asc
+                order by created_at asc, case when role = 'user' then 0 else 1 end, id asc
                 """,
                 (chat_id_clean,),
             )
@@ -196,7 +196,7 @@ def send_message(
 
     clear_progress(chat_id_clean)
     try:
-        result = ask(graph, content, chat_id_clean)
+        result = ask(graph, content, chat_id_clean, session_id=session_id)
     except Exception as exc:
         logger.exception("Fallo al procesar el mensaje con el agente para el chat %s", chat_id_clean)
         raise HTTPException(
@@ -215,15 +215,7 @@ def send_message(
     abstained = bool(result.get("abstained"))
     verified = bool(result.get("verified"))
     category = result.get("category")
-    verification_mode = (
-        "citas"
-        if any(
-            "Verificador no disponible" in str(issue)
-            or "Verificación determinista de citas" in str(issue)
-            for issue in issues
-        )
-        else "llm"
-    )
+    verification_mode = "citas" if verified else None
     graph_trace = [
         {
             "node": "supervisor",
@@ -332,6 +324,19 @@ def _cleanup_reports_and_checkpoints(conn, chat_ids: list[str], session_id: str 
     if not chat_ids and not session_id:
         return
     with conn.cursor(row_factory=dict_row) as cur:
+        # Revocar reportes de inmediato en base de datos para impedir descargas concurrentes
+        # Usamos status = 'failed' y metadata {revoked: true} para respetar check constraints existentes
+        rev_query = (
+            "update public.reports set status = 'failed', "
+            "metadata = jsonb_set(coalesce(metadata, '{}'::jsonb), '{revoked}', 'true'::jsonb), "
+            "updated_at = now() where chat_id = any(%s::uuid[])"
+        )
+        rev_params: list[Any] = [chat_ids]
+        if session_id:
+            rev_query += " or session_id = %s"
+            rev_params.append(session_id)
+        cur.execute(rev_query, tuple(rev_params))
+
         query = "select id, storage_key, metadata from public.reports where chat_id = any(%s::uuid[])"
         params: list[Any] = [chat_ids]
         if session_id:
@@ -345,14 +350,14 @@ def _cleanup_reports_and_checkpoints(conn, chat_ids: list[str], session_id: str 
             if local_path.is_file():
                 try:
                     local_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Fallo al eliminar archivo local de reporte %s: %s", r.get("id"), exc)
             r2_key = meta.get("r2_key") or r.get("storage_key")
             if r2_key and R2Storage.is_configured():
                 try:
                     R2Storage().delete(str(r2_key))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Fallo al eliminar archivo R2 de reporte %s: %s", r.get("id"), exc)
 
         del_rep_query = "delete from public.reports where chat_id = any(%s::uuid[])"
         del_rep_params: list[Any] = [chat_ids]
@@ -361,13 +366,19 @@ def _cleanup_reports_and_checkpoints(conn, chat_ids: list[str], session_id: str 
             del_rep_params.append(session_id)
         cur.execute(del_rep_query, tuple(del_rep_params))
 
+        # Limpiar checkpoints con SAVEPOINT para no invalidar la transacción si las tablas no existen
         for cid in chat_ids:
             try:
+                cur.execute("SAVEPOINT sp_cp")
                 cur.execute("delete from langgraph.checkpoint_writes where thread_id = %s", (cid,))
                 cur.execute("delete from langgraph.checkpoint_blobs where thread_id = %s", (cid,))
                 cur.execute("delete from langgraph.checkpoints where thread_id = %s", (cid,))
+                cur.execute("RELEASE SAVEPOINT sp_cp")
             except Exception:
-                pass
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_cp")
+                except Exception:
+                    pass
 
 
 @router.delete("", status_code=204)

@@ -190,23 +190,10 @@ export const cookies = {
   },
 
   /**
-   * Obtiene o inicializa la sesión anónima persistente (alpina_session_id).
-   * Sincroniza entre localStorage y cookie SameSite=Lax.
+   * Obtiene la sesión anónima persistente (alpina_session_id) emitida por el servidor.
    */
   getSessionId() {
-    let sessionId = local.get("session_id", null);
-    if (!sessionId) {
-      sessionId = this.get("session_id");
-    }
-    if (!sessionId) {
-      const randomPart = typeof crypto !== "undefined" && crypto.randomUUID
-        ? crypto.randomUUID()
-        : (Math.random().toString(36).substring(2, 15) + "-" + Date.now().toString(36));
-      sessionId = `sess_${randomPart}`;
-    }
-    local.set("session_id", sessionId);
-    this.set("session_id", sessionId, 365);
-    return sessionId;
+    return this.get("alpina_session_id") || "";
   },
 };
 
