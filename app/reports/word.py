@@ -104,9 +104,11 @@ def _add_formatted_run(paragraph, text: str, font_name="Segoe UI", font_size=10.
             run.italic = italic
 
 
-def render_docx(spec: ReportSpec, path: Path) -> Path:
+def render_docx(spec: ReportSpec, path: Path | io.BytesIO | str) -> Path | io.BytesIO:
     """Genera un documento Word (.docx) formal, ejecutivo y corporativo para Alpina."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(path, (str, Path)):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
     doc = Document()
 
     # Configuración de página: A4 con márgenes ejecutivos de 2.54 cm
@@ -374,8 +376,12 @@ def render_docx(spec: ReportSpec, path: Path) -> Path:
                 if c_idx == 0:
                     r.font.bold = True
 
-    doc.save(str(path))
-    return path
+    if isinstance(path, (str, Path)):
+        doc.save(str(path))
+        return Path(path)
+    else:
+        doc.save(path)
+        return path
 
 
 def generate_word_report(
@@ -441,19 +447,5 @@ def generate_word_report(
     )
 
     buffer = io.BytesIO()
-    # Guardar en buffer en memoria
-    temp_doc = Document()
-    render_docx(spec, Path("dummy.docx"))
-    # Leer el archivo temporal o guardar directamente en buffer
-    # Para guardar directamente en buffer:
-    doc = Document()
-    # Usar render_docx guardando en buffer temporal
-    temp_path = Path("data/cache/temp_word.docx")
-    temp_path.parent.mkdir(parents=True, exist_ok=True)
-    render_docx(spec, temp_path)
-    data = temp_path.read_bytes()
-    try:
-        temp_path.unlink()
-    except Exception:
-        pass
-    return data
+    render_docx(spec, buffer)
+    return buffer.getvalue()
