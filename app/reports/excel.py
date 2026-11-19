@@ -5,13 +5,15 @@ import math
 import re
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.chart import BarChart, Reference
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from app.reports.charts import citations_chart_png, verification_chart_png, financial_performance_chart_png
+from app.reports.charts import citations_chart_png, verification_chart_png
 from app.reports.financial import is_financial_query
 from app.reports.spec import ReportSpec, ReportTable
 
@@ -36,8 +38,11 @@ def _thin_border() -> Border:
     return Border(left=side, right=side, top=side, bottom=side)
 
 
-def _parse_numeric(val: Any) -> tuple[Any, str | None]:
-    """Detecta y convierte cadenas con números, porcentajes o moneda a valores numéricos nativos de Excel."""
+def _parse_numeric(val: Any, col_name: str = "") -> tuple[Any, str | None]:
+    """Detecta y convierte cadenas con números, porcentajes o moneda a valores numéricos nativos de Excel.
+
+    Conserva EAN, SKU e identificadores con ceros iniciales como texto literal (R10).
+    """
     from decimal import Decimal
 
     if isinstance(val, (int, float, Decimal)):
@@ -48,6 +53,14 @@ def _parse_numeric(val: Any) -> tuple[Any, str | None]:
     if not s:
         return s, None
 
+    col_clean = str(col_name or "").strip().lower()
+    # Si la columna es identificador (EAN, SKU, Código) o tiene ceros a la izquierda seguidos de dígitos
+    if re.search(r"\b(?:ean|sku|c[oó]digo|identificador|id)\b", col_clean):
+        return s, "@"
+    if re.match(r"^0\d+$", s):
+        # EAN o código con ceros a la izquierda (ej. 0123456789012)
+        return s, "@"
+
     # Porcentajes: e.g. "+6,3%", "-1.5%", "15.0%"
     if s.endswith("%"):
         clean_p = s[:-1].replace("+", "").replace(",", ".").strip()
@@ -56,24 +69,19 @@ def _parse_numeric(val: Any) -> tuple[Any, str | None]:
         except ValueError:
             pass
 
-    # Moneda: e.g. "$ 2.458.120.350"
-    if s.startswith("$"):
-        rem = s.replace("$", "").strip()
-        if not any(c.isalpha() for c in rem):
-            clean_c = rem.replace(".", "").replace(",", ".").strip()
-            try:
-                return float(clean_c), "$ #,##0"
-            except ValueError:
-                pass
+    currency = s.startswith("$") or s.startswith("($")
+    amount = s.replace("$", "").strip()
+    if amount.startswith("(") and amount.endswith(")"):
+        amount = "-" + amount[1:-1].strip()
+    if re.fullmatch(r"-?\d{1,3}([.,])\d{3}(?:\1\d{3})*", amount):
+        amount = amount.replace(".", "").replace(",", "")
+        return (float(amount), "$ #,##0") if currency else (int(amount), "#,##0")
+    if currency and re.fullmatch(r"-?\d+(?:[.,]\d+)?", amount):
+        return float(amount.replace(",", ".")), "$ #,##0"
 
     # Números enteros o flotantes puros
-    if re.match(r"^-?\d+(\.\d+)?$", s):
-        try:
-            if "." in s:
-                return float(s), None
-            return int(s), None
-        except ValueError:
-            pass
+    if re.fullmatch(r"-?\d+(\.\d+)?", amount):
+        return (float(amount) if "." in amount else int(amount)), None
 
     return val, None
 
@@ -259,8 +267,8 @@ def _write_dashboard(wb: Workbook, spec: ReportSpec) -> None:
     )
     ws["A3"] = "Fecha"
     ws["B3"] = spec.report_date.strftime("%d/%m/%Y")
-    ws["C3"] = "Cobertura"
-    ws["D3"] = "100% Oficial"
+    ws["C3"] = "Verificación"
+    ws["D3"] = status
     for cell in ("A3", "C3"):
         ws[cell].font = Font(name=FONT, size=8.5, bold=True, color=MUTED)
     for cell in ("B3", "D3"):
@@ -276,22 +284,12 @@ def _write_dashboard(wb: Workbook, spec: ReportSpec) -> None:
         if section.heading.casefold().startswith("producto") and section.table
     )
 
-    is_financial = is_financial_query(spec.query, spec.citations)
-
-    if is_financial:
-        kpis = [
-            ("Ingresos Ventas 2025", "$ 2.458 B"),
-            ("Margen Bruto", "39,7%"),
-            ("EBITDA Operativo", "$ 368 M"),
-            ("Utilidad Neta", "$ 114 M"),
-        ]
-    else:
-        kpis = [
-            ("Documentos citados", len(counts)),
-            ("Páginas", unique_pages),
-            ("Citas", len(spec.citations)),
-            ("Productos", product_count),
-        ]
+    kpis = [
+        ("Documentos citados", len(counts)),
+        ("Páginas", unique_pages),
+        ("Citas", len(spec.citations)),
+        ("Productos", product_count),
+    ]
     for index, (label, value) in enumerate(kpis):
         column = 1 + (index % 2) * 2
         row = 5 + (index // 2)
@@ -306,36 +304,7 @@ def _write_dashboard(wb: Workbook, spec: ReportSpec) -> None:
         value_cell.alignment = Alignment(horizontal="center", vertical="center")
         ws.row_dimensions[row].height = 25
 
-    if is_financial:
-        ws["A8"] = "Rubro Clave"
-        ws["B8"] = "Cifra 2025"
-        for cell in ("A8", "B8"):
-            ws[cell].font = Font(name=FONT, size=8.5, bold=True, color=WHITE)
-            ws[cell].fill = _fill(BLUE)
-            ws[cell].border = _thin_border()
-
-        fin_summary = [
-            ("Ventas Ordinarias", "$ 2.458.120 M"),
-            ("Costo de Ventas", "$ 1.482.310 M"),
-            ("Ganancia Bruta", "$ 975.810 M"),
-            ("EBITDA", "$ 368.450 M"),
-            ("Utilidad Neta", "$ 114.367 M"),
-        ]
-        for offset, (rubro, cifra) in enumerate(fin_summary, start=1):
-            c1 = ws.cell(row=8 + offset, column=1, value=rubro)
-            c2 = ws.cell(row=8 + offset, column=2, value=cifra)
-            for c in (c1, c2):
-                c.font = Font(name=FONT, size=8.5, color=INK)
-                c.border = _thin_border()
-
-        _add_chart_image(
-            ws,
-            financial_performance_chart_png(),
-            "D8",
-            width=640,
-            height=310,
-        )
-    else:
+    if is_financial_query(spec.query, spec.citations):
         ws["A8"] = "Documento"
         ws["B8"] = "Citas"
         for cell in ("A8", "B8"):
@@ -518,12 +487,17 @@ def _write_table(
     )
     row += 1
 
+    start_data_row = row
     for values in table.rows:
         padded = list(values) + [""] * max(0, column_count - len(values))
         for column, value in enumerate(padded[:column_count], start=1):
-            parsed_val, num_fmt = _parse_numeric(value)
+            col_name = table.columns[column - 1] if column - 1 < len(table.columns) else ""
+            parsed_val, num_fmt = _parse_numeric(value, col_name=col_name)
             cell = ws.cell(row=row, column=column, value=parsed_val)
-            if num_fmt:
+            if num_fmt == "@":
+                cell.data_type = "s"
+                cell.number_format = "@"
+            elif num_fmt:
                 cell.number_format = num_fmt
             cell.font = Font(name=FONT, size=8.5, color=INK)
             cell.border = _thin_border()
@@ -533,6 +507,28 @@ def _write_table(
             column_widths[:column_count],
         )
         row += 1
+    end_data_row = row - 1
+
+    # Agregar gráfico nativo de Excel si la tabla tiene 2 o más columnas y datos numéricos (R10)
+    if len(table.rows) >= 2 and column_count >= 2:
+        try:
+            chart = BarChart()
+            chart.type = "col"
+            chart.style = 10
+            chart.title = table.title or "Datos tabulados oficiales"
+            chart.y_axis.title = "Cifras oficiales"
+            chart.x_axis.title = str(table.columns[0])
+            data_ref = Reference(ws, min_col=2, min_row=start_data_row - 1, max_row=end_data_row, max_col=min(column_count, 3))
+            cats_ref = Reference(ws, min_col=1, min_row=start_data_row, max_row=end_data_row)
+            chart.add_data(data_ref, titles_from_data=True)
+            chart.set_categories(cats_ref)
+            chart.width = 16
+            chart.height = 9
+            chart_cell = f"A{row + 2}"
+            ws.add_chart(chart, chart_cell)
+            row += 18
+        except Exception:
+            pass
 
     if table.notes:
         ws.merge_cells(

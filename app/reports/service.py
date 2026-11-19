@@ -3,16 +3,20 @@ from __future__ import annotations
 import re
 import threading
 import uuid
+import logging
 from typing import Any
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.agent.prompts import ABSTENTION
+from app.core.crypto import encrypt_text
 from app.db.connection import connect
 from app.reports.financial import is_financial_query, get_financial_sections
 from app.reports.generator import generate_report
 from app.reports.spec import ReportCitation, ReportSection, ReportSpec, ReportTable
-from app.storage.r2 import R2Storage, R2StorageError
+from app.storage.r2 import R2Storage
+
+logger = logging.getLogger(__name__)
 
 
 def create_report_record(
@@ -31,6 +35,10 @@ def create_report_record(
     if report_type_clean not in {"pdf", "xlsx", "docx"}:
         report_type_clean = "pdf"
 
+    # R04: Una abstención o respuesta sin respaldo NO debe publicar un archivo
+    if abstained or not citations or not answer.strip() or answer.strip() == ABSTENTION:
+        raise ValueError("No se puede generar un reporte para una respuesta con abstención o sin respaldo documental.")
+
     clean_citations: list[ReportCitation] = []
     for c in citations or []:
         if isinstance(c, ReportCitation):
@@ -40,6 +48,17 @@ def create_report_record(
                 clean_citations.append(ReportCitation(**c))
             except Exception:
                 continue
+    if not clean_citations:
+        raise ValueError("El reporte necesita al menos una cita documental válida.")
+
+    clean_chat_id = str(uuid.UUID(chat_id)) if chat_id else None
+    resolved_session_id = session_id
+    if clean_chat_id:
+        with connect() as conn:
+            chat_row = conn.execute("select session_id from public.chats where id = %s", (clean_chat_id,)).fetchone()
+            if not chat_row or (session_id and str(chat_row[0]) != session_id):
+                raise ValueError("El chat del reporte no está disponible para esta sesión.")
+            resolved_session_id = str(chat_row[0])
 
     # Extraer información de productos si se citan SKUs
     product_rows: list[list[str]] = []
@@ -94,7 +113,7 @@ def create_report_record(
             else:
                 para_lines.append(line_s)
         if para_lines:
-            answer_paragraphs.append(" ".join(para_lines))
+            answer_paragraphs.append("\n".join(para_lines))
 
     # Título adaptativo personalizado
     q_clean = question or "Consulta documental"
@@ -106,13 +125,35 @@ def create_report_record(
         flags=re.IGNORECASE,
     ).rstrip("?¡!").strip()
 
+    # Determinar periodo y alcance dinámico de la consulta o citas (R03)
+    year_match = re.search(r"\b(202\d)\b", q_clean)
+    period = year_match.group(1) if year_match else ""
+    if not period and clean_citations:
+        for c in clean_citations:
+            v = str(getattr(c, "version", "") or (c.get("version") if isinstance(c, dict) else ""))
+            m = re.search(r"\b(202\d)\b", v)
+            if m:
+                period = m.group(1)
+                break
+
     is_financial = is_financial_query(q_clean, clean_citations)
 
     if is_financial:
-        report_title = "Informe de Resultados Financieros 2025 · Alpina"
-        report_subtitle = "Estados Financieros Consolidados y Separados Auditados · Alpina S.A.S. BIC"
-        sections = get_financial_sections(q_clean, answer_paragraphs, answer_bullets)
-    elif any(k in q_lower for k in ("ley", "resoluci", "norma", "sello", "etiquetad", "rotulad", "invima", "calidad", "inocuidad")):
+        period_suffix = f" {period}" if period else ""
+        report_title = f"Informe de Resultados Financieros{period_suffix} · Alpina"
+        report_subtitle = "Estados Financieros Oficiales Auditados · Alpina S.A.S. BIC"
+        sections = get_financial_sections(q_clean, answer_paragraphs, answer_bullets, clean_citations)
+    elif {citation.document_id for citation in clean_citations} == {"N11"}:
+        report_title = "Informe de Calidad e Inocuidad · Alpina"
+        report_subtitle = "Política de Calidad, Inocuidad y Gestión Ambiental"
+        sections = [
+            ReportSection(
+                heading="Compromisos de la política",
+                body=answer_paragraphs,
+                bullets=answer_bullets,
+            ),
+        ]
+    elif any(k in q_lower for k in ("ley", "resoluci", "norma", "sello", "etiquetad", "rotulad", "invima")):
         report_title = "Informe de Normativa y Etiquetado · Alpina"
         report_subtitle = "Marco Regulatorio y Requisitos Sanitarios Oficiales en Colombia"
         analysis_heading = "Disposiciones Normativas y Requisitos Sanitarios"
@@ -190,19 +231,11 @@ def create_report_record(
 
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            clean_chat_id = None
-            resolved_session_id = session_id
-            if chat_id:
-                try:
-                    uuid.UUID(str(chat_id))
-                    cur.execute("select id, session_id from public.chats where id = %s", (str(chat_id),))
-                    chat_row = cur.fetchone()
-                    if chat_row:
-                        clean_chat_id = str(chat_id)
-                        if not resolved_session_id and chat_row.get("session_id"):
-                            resolved_session_id = str(chat_row["session_id"])
-                except Exception:
-                    clean_chat_id = None
+            spec_dict = spec.model_dump(mode="json")
+            if spec_dict.get("query"):
+                spec_dict["query"] = encrypt_text(spec_dict["query"])
+            if spec_dict.get("summary"):
+                spec_dict["summary"] = encrypt_text(spec_dict["summary"])
 
             cur.execute(
                 """
@@ -218,7 +251,7 @@ def create_report_record(
                     resolved_session_id,
                     artifact.report_type,
                     spec.title,
-                    Jsonb(spec.model_dump(mode="json")),
+                    Jsonb(spec_dict),
                     storage_key,
                     Jsonb(metadata),
                 ),
@@ -255,7 +288,7 @@ def create_report_record(
                             (s_key, rep_id),
                         )
             except Exception:
-                pass
+                logger.exception("No se pudo sincronizar el informe en R2")
 
         threading.Thread(
             target=_bg_sync,

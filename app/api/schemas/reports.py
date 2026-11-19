@@ -6,3 +6,4 @@ from pydantic import BaseModel
 
 class ReportRequest(BaseModel):
     report_type: Literal["pdf", "xlsx", "docx"]
+    message_id: str | None = None

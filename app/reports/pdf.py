@@ -23,8 +23,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from app.reports.charts import citations_chart_png, verification_chart_png, financial_performance_chart_png
-from app.reports.financial import is_financial_query
+from app.reports.charts import citations_chart_png, verification_chart_png
 from app.reports.spec import ReportSpec, ReportTable
 
 BLUE = colors.HexColor("#0152D1")
@@ -270,22 +269,17 @@ def _logo_flowables(styles: dict[str, ParagraphStyle]) -> list:
 
 
 def _kpi_flowables(spec: ReportSpec, styles: dict[str, ParagraphStyle]) -> list:
-    is_financial = is_financial_query(spec.query, spec.citations)
-    if is_financial:
-        labels = ["Ingresos 2025", "Margen Bruto", "EBITDA", "Utilidad Neta"]
-        values = ["$ 2.458 B", "39,7%", "$ 368 M", "$ 114 M"]
-    else:
-        unique_documents = len({citation.document_id for citation in spec.citations})
-        unique_pages = len(
-            {(citation.document_id, citation.page) for citation in spec.citations}
-        )
-        labels = ["Documentos Oficiales", "Páginas Auditadas", "Citas Respaldadas", "Nivel de Cobertura"]
-        values = [
-            str(unique_documents),
-            str(unique_pages),
-            str(len(spec.citations)),
-            "100% Oficial",
-        ]
+    unique_documents = len({citation.document_id for citation in spec.citations})
+    unique_pages = len(
+        {(citation.document_id, citation.page) for citation in spec.citations}
+    )
+    labels = ["Documentos citados", "Páginas citadas", "Citas", "Verificación"]
+    values = [
+        str(unique_documents),
+        str(unique_pages),
+        str(len(spec.citations)),
+        spec.verification_status or "Sin verificar",
+    ]
 
     data = [
         [_paragraph(label, styles["kpi_label"]) for label in labels],
@@ -317,21 +311,12 @@ def _chart_image(png: bytes, width: float = 460) -> RLImage:
 
 
 def _citations_chart(spec: ReportSpec, styles: dict[str, ParagraphStyle]) -> list:
-    is_financial = is_financial_query(spec.query, spec.citations)
-    if is_financial:
-        png = financial_performance_chart_png(title="Resultados y Márgenes Financieros 2025")
-        image = _chart_image(png, width=460)
-        image.hAlign = "LEFT"
-        return [
-            _paragraph("Desempeño Financiero y Estructura de Resultados (P&L)", styles["h3"]),
-            image,
-            Spacer(1, 0.15 * cm),
-        ]
-
     if not spec.citations:
         return []
 
     png = citations_chart_png(spec.citations, title="")
+    if not png:
+        return []
     image = _chart_image(png, width=460)
     image.hAlign = "LEFT"
     unique_documents = len({citation.document_id for citation in spec.citations})

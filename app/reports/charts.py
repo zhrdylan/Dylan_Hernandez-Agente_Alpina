@@ -287,20 +287,14 @@ def verification_chart_png(
 
 
 def financial_performance_chart_png(
-    title: str = "Desempeño Financiero Oficial Alpina 2025 (Miles de Millones COP)",
-) -> bytes:
-    """Gráfico de barras de desempeño financiero real (Ingresos vs Costos vs Utilidades)."""
-    labels = [
-        "Ingresos Ventas",
-        "Costo Ventas",
-        "Ganancia Bruta",
-        "EBITDA",
-        "Utilidad Oper.",
-        "Utilidad Neta",
-    ]
-    # Cifras en miles de millones de COP (Doc. C4 y C5 oficiales)
-    values = [2458.12, 1482.31, 975.81, 368.45, 295.69, 114.37]
-    bar_colors = [BLUE, "#64748B", GREEN, "#0891B2", "#0284C7", "#10B981"]
+    labels: list[str] | None = None,
+    values: list[float] | None = None,
+    title: str = "Desempeño Financiero",
+) -> bytes | None:
+    """Gráfico de barras de desempeño financiero sustentado en datos reales del turno (R03)."""
+    if not labels or not values or len(labels) != len(values):
+        return None
+    bar_colors = [BLUE, "#64748B", GREEN, "#0891B2", "#0284C7", "#10B981"] * 3
 
     figure = _figure(7.8, 3.6)
     axis = figure.add_subplot(1, 1, 1)

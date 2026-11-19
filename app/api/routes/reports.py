@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from app.reports.spec import ReportCitation
 from app.storage.r2 import R2Storage, R2StorageError
 
 router = APIRouter(tags=["reports"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/api/chats/{chat_id}/reports")
@@ -44,17 +46,29 @@ def create_report(
             if not chat:
                 raise HTTPException(status_code=404, detail="Chat no encontrado.")
 
-            cur.execute(
-                """
-                select content, citations, metadata, created_at
-                from public.messages
-                where chat_id = %s and role = 'assistant'
-                order by created_at desc, id desc
-                limit 1
-                """,
-                (chat_id_clean,),
-            )
-            assistant = cur.fetchone()
+            if payload.message_id:
+                cur.execute(
+                    """
+                    select id, content, citations, metadata, created_at
+                    from public.messages
+                    where id = %s and chat_id = %s and role = 'assistant'
+                    """,
+                    (payload.message_id, chat_id_clean),
+                )
+                assistant = cur.fetchone()
+            else:
+                cur.execute(
+                    """
+                    select id, content, citations, metadata, created_at
+                    from public.messages
+                    where chat_id = %s and role = 'assistant'
+                    order by created_at desc, id desc
+                    limit 1
+                    """,
+                    (chat_id_clean,),
+                )
+                assistant = cur.fetchone()
+
             if not assistant:
                 raise HTTPException(
                     status_code=400,
@@ -65,11 +79,11 @@ def create_report(
                 """
                 select content
                 from public.messages
-                where chat_id = %s and role = 'user'
+                where chat_id = %s and role = 'user' and created_at <= %s
                 order by created_at desc, id desc
                 limit 1
                 """,
-                (chat_id_clean,),
+                (chat_id_clean, assistant["created_at"]),
             )
             user_message = cur.fetchone()
 
@@ -108,6 +122,13 @@ def create_report(
     clean_answer = decrypt_text(raw_answer)
     clean_question = decrypt_text(raw_question)
 
+    # R04: Una abstención o respuesta sin respaldo documental NO debe publicar un archivo
+    if not verified or abstained or not citations or clean_answer.strip() == ABSTENTION:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede exportar un reporte para una respuesta con abstención o sin evidencia documental verificada.",
+        )
+
     try:
         return create_report_record(
             chat_id=chat_id_clean,
@@ -120,10 +141,13 @@ def create_report(
             category=str(assistant_metadata.get("category") or "").lower(),
             session_id=session_id,
         )
+    except ValueError as val_exc:
+        raise HTTPException(status_code=400, detail=str(val_exc)) from val_exc
     except Exception as exc:
+        logger.exception("No se pudo generar el reporte para el chat %s", chat_id_clean)
         raise HTTPException(
             status_code=500,
-            detail=f"No se pudo generar el reporte: {type(exc).__name__}: {exc}",
+            detail="No se pudo generar el reporte. Vuelve a intentarlo en unos instantes.",
         ) from exc
 
 
