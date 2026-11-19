@@ -16,6 +16,7 @@ from app.agent.llm import chat_json, chat_text
 from app.agent.progress import record_progress
 from app.agent.validation import (
     classify_conversational_intent,
+    detect_out_of_domain_or_jailbreak,
     detect_report_request,
     resolve_document_ids,
     validate_answer_payload,
@@ -150,6 +151,23 @@ def supervisor_node(state: AgentState) -> dict:
     query = _last_user_query(messages)
     history = prompts.format_history(messages[:-1]) if messages else ""
     issues = list(state.get("issues") or [])
+
+    # Fast-path 0: Guardrails de seguridad contra evasión, hacking y consultas fuera de dominio
+    guardrail_answer = detect_out_of_domain_or_jailbreak(query)
+    if guardrail_answer is not None:
+        return {
+            "category": "guardrail",
+            "search_query": "",
+            "filters": {},
+            "needs_documents": False,
+            "results": [],
+            "citations": [],
+            "answer": guardrail_answer,
+            "abstained": False,
+            "verified": True,
+            "issues": ["Consulta mitigada por guardrail de seguridad (fuera de dominio o jailbreak)."],
+            "timings": _timing(state, "supervisor", started),
+        }
 
     # Fast-path 1 (<1ms): Saludos, cortesías y charla social sin latencia de router
     intent = classify_conversational_intent(query)
@@ -336,6 +354,17 @@ def answer_node(state: AgentState) -> dict:
     results = list(state.get("results") or [])
     issues = list(state.get("issues") or [])
 
+    if state.get("category") == "guardrail":
+        guard_ans = state.get("answer") or "Solicitud fuera del alcance oficial de Alpina."
+        return {
+            "answer": guard_ans,
+            "citations": [],
+            "abstained": False,
+            "verified": True,
+            "messages": [AIMessage(content=guard_ans)],
+            "timings": _timing(state, "answer", started),
+        }
+
     if not state.get("needs_documents", True) or state.get("category") == "general":
         conversational_answer = generate_conversational_response(query, history)
         return {
@@ -441,6 +470,17 @@ def verify_node(state: AgentState) -> dict:
     citations = list(state.get("citations") or [])
     abstained = bool(state.get("abstained"))
     issues = list(state.get("issues") or [])
+
+    if state.get("category") == "guardrail":
+        guard_ans = state.get("answer") or "Solicitud fuera del alcance oficial de Alpina."
+        return {
+            "answer": guard_ans,
+            "citations": [],
+            "abstained": False,
+            "verified": True,
+            "messages": [AIMessage(content=guard_ans)],
+            "timings": _timing(state, "answer", started),
+        }
 
     if not state.get("needs_documents", True) or state.get("category") == "general":
         return {

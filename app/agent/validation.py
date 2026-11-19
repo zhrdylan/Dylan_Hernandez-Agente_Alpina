@@ -121,13 +121,55 @@ def resolve_document_ids(query: str) -> list[str]:
     return resolved
 
 
+GUARDRAIL_JAILBREAK_RE = re.compile(
+    r"\b("
+    r"cu[aá]l\s+es\s+tu\s+prompt|revela\s+tu\s+prompt|mu[eé]strame\s+tu\s+prompt|tu\s+system\s+prompt|"
+    r"system\s*prompt|instrucciones\s+internas|reglas\s+internas|tu\s+prompt|ignore\s+all\s+previous|"
+    r"ignore\s+previous\s+instructions|olvida\s+tus\s+instrucciones|act\s+as\s+a\s+dan|jailbreak|"
+    r"developer\s+mode|dan\s+mode"
+    r")\b",
+    re.IGNORECASE,
+)
+
+GUARDRAIL_MALICIOUS_RE = re.compile(
+    r"\b("
+    r"hacking|hackear|exploit|malware|keylogger|ddos|inyecci[oó]n\s+sql|sql\s+injection|"
+    r"script\s+de\s+hacking|script\s+en\s+python\s+de\s+hacking|ataque\s+cibern[eé]tico|"
+    r"vulnerabilidad\s+zero-day|payload\s+malicioso|crear\s+virus"
+    r")\b",
+    re.IGNORECASE,
+)
+
+GUARDRAIL_RESPONSE = (
+    "Como asistente corporativo de Alpina, mi labor está orientada exclusivamente a resolver consultas "
+    "sobre nuestro portafolio de productos, tablas nutricionales, normativas de etiquetado en Colombia y "
+    "reportes corporativos oficiales.\n\n"
+    "No tengo autorización para generar código ajeno, brindar asistencia sobre explotación/hacking ni "
+    "divulgar configuraciones o instrucciones internas del sistema. ¿En qué información sobre nuestros "
+    "productos o documentos oficiales te puedo colaborar hoy?"
+)
+
+
+def detect_out_of_domain_or_jailbreak(query: str) -> str | None:
+    """Detecta intentos de evasión, robo de prompt o solicitudes fuera de dominio."""
+    if not query:
+        return None
+    q = query.strip()
+    if GUARDRAIL_JAILBREAK_RE.search(q) or GUARDRAIL_MALICIOUS_RE.search(q):
+        return GUARDRAIL_RESPONSE
+    return None
+
+
 SUBSTANTIVE_KEYWORDS_RE = re.compile(
-    r"\b(reporte|informe|dossier|excel|pdf|xlsx|venta|ventas|precio|precios|costo|costos|"
+    r"\b(reporte|informe|dossier|excel|pdf|xlsx|word|docx|venta|ventas|precio|precios|costo|costos|"
     r"ebitda|balance|ingreso|ingresos|utilidad|utilidades|eeff|resoluci[oó]n|ley|norma|normograma|"
     r"rotulado|etiquetado|nutricional|calor[ií]as|grasa|az[uú]car|sodio|ingrediente|ingredientes|"
     r"al[eé]rgeno|al[eé]rgenos|leche|yogurt|yogur|queso|quesito|mantequilla|alpinito|bon\s*yurt|"
     r"finesse|yox|defensis|baby\s*gu|cu[aá]nto|cu[aá]l|cu[aá]les|qu[eé]\s+es|qu[eé]\s+dice|"
-    r"qu[eé]\s+contiene|dime|explica|busca|compara|genera|dame|mu[eé]strame|hazme)\b",
+    r"qu[eé]\s+contiene|dime|explica|busca|compara|genera|dame|mu[eé]strame|hazme|"
+    r"202[0-9]|financier[oa]s?|resultado[s]?|margen|m[aá]rgenes|activo[s]?|pasivo[s]?|patrimonio|"
+    r"ganancia[s]?|crecimiento|tendencia[s]?|sostenibilidad|calidad|bic|alimentos|bebida[s]?|alpina|"
+    r"comida|chatarra|sellos?)\b",
     re.IGNORECASE,
 )
 
@@ -391,7 +433,7 @@ def validate_answer_payload(payload: dict, results: Iterable[Any]) -> dict:
     raw_report = payload.get("generate_report")
     if isinstance(raw_report, dict):
         report_type = str(raw_report.get("report_type") or "pdf").lower().strip()
-        if report_type not in {"pdf", "xlsx"}:
+        if report_type not in {"pdf", "xlsx", "docx"}:
             report_type = "pdf"
         report_action = {
             "report_type": report_type,
@@ -412,20 +454,21 @@ EXPLICIT_XLSX_RE = re.compile(
     r"\b(excel|xlsx|hoja\s+de\s+c[aá]lculo|hojas\s+de\s+c[aá]lculo)\b",
     re.IGNORECASE,
 )
+EXPLICIT_DOCX_RE = re.compile(r"\b(word|docx|doc)\b", re.IGNORECASE)
 FILE_ACTION_RE = re.compile(
     r"\b(gener|crea|haz|hazme|elabor|export|descarg|sacar|saca|armar|arma|bajar|baja|pasar|pasa|envia|enviar|dame|entreg)\w*",
     re.IGNORECASE,
 )
 FILE_CONTEXT_RE = re.compile(
-    r"\b(en\s+pdf|en\s+excel|en\s+xlsx|un\s+pdf|un\s+excel|archivo\s+pdf|archivo\s+excel|reporte\s+en|informe\s+en|balance\s+en)\b",
+    r"\b(en\s+pdf|en\s+excel|en\s+xlsx|en\s+word|en\s+docx|un\s+pdf|un\s+excel|un\s+word|un\s+docx|archivo\s+pdf|archivo\s+excel|archivo\s+word|archivo\s+docx|reporte\s+en|informe\s+en|balance\s+en)\b",
     re.IGNORECASE,
 )
 
 
 def detect_report_request(query: str) -> dict | None:
-    """Detecta de forma estricta si la consulta solicita generar un archivo PDF o Excel/XLSX.
+    """Detecta de forma estricta si la consulta solicita generar un archivo PDF, Excel/XLSX o Word/DOCX.
     
-    SOLO se activa si el usuario pide explícitamente un PDF o un Excel.
+    SOLO se activa si el usuario pide explícitamente un PDF, Excel o Word.
     Consultas normales sobre informes documentales (como 'informe de gestión') NO activan la herramienta.
     """
     if not query:
@@ -433,14 +476,20 @@ def detect_report_request(query: str) -> dict | None:
     q = query.strip()
     is_pdf = bool(EXPLICIT_PDF_RE.search(q))
     is_xlsx = bool(EXPLICIT_XLSX_RE.search(q))
+    is_docx = bool(EXPLICIT_DOCX_RE.search(q))
 
-    # Regla estricta: Si no menciona PDF ni Excel, NUNCA se genera reporte
-    if not is_pdf and not is_xlsx:
+    # Regla estricta: Si no menciona PDF, Excel ni Word, NUNCA se genera reporte
+    if not is_pdf and not is_xlsx and not is_docx:
         return None
 
     # Requiere intención explícita de generar/descargar/exportar el archivo
     if FILE_ACTION_RE.search(q) or FILE_CONTEXT_RE.search(q):
-        report_type = "xlsx" if is_xlsx else "pdf"
+        if is_docx:
+            report_type = "docx"
+        elif is_xlsx:
+            report_type = "xlsx"
+        else:
+            report_type = "pdf"
         return {
             "report_type": report_type,
             "topic": q[:100],
