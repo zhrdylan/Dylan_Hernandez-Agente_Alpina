@@ -23,6 +23,8 @@ class Settings(BaseSettings):
 
     database_url: str = ""
 
+    chat_encryption_key: str = ""
+
     groq_api_key: str = ""
     groq_model_answer: str = "openai/gpt-oss-120b"
     groq_model_router: str = "openai/gpt-oss-20b"

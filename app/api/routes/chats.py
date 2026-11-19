@@ -16,10 +16,12 @@ from app.api.deps import (
     chat_uuid as validate_chat_uuid,
     get_agent_graph,
     get_checkpointer,
+    get_current_session_id,
     get_current_user_id,
 )
 from app.api.schemas.chats import ChatCreate, MessageCreate
 from app.config import settings
+from app.core.crypto import decrypt_text, encrypt_text
 from app.db.connection import connect
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
@@ -41,58 +43,84 @@ def _json_safe(val: Any) -> Any:
 
 
 @router.get("")
-def list_chats(user_id: str = Depends(get_current_user_id)) -> list[dict]:
-    """Lista las conversaciones activas del usuario ordenadas por actualización reciente."""
+def list_chats(session_id: str = Depends(get_current_session_id)) -> list[dict]:
+    """Lista las conversaciones activas de la sesión actual ordenadas por actualización reciente."""
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                select id::text as id, title, user_id, created_at, updated_at
+                select id::text as id, title, user_id, session_id, created_at, updated_at
                 from public.chats
-                where user_id = %s
+                where session_id = %s or user_id = %s
                 order by updated_at desc
                 """,
-                (user_id,),
+                (session_id, session_id),
             )
-            return list(cur.fetchall())
+            rows = list(cur.fetchall())
+            for row in rows:
+                if row.get("title"):
+                    row["title"] = decrypt_text(row["title"])
+            return rows
 
 
 @router.post("")
 def create_chat(
     payload: ChatCreate | None = None,
-    user_id: str = Depends(get_current_user_id),
+    session_id: str = Depends(get_current_session_id),
 ) -> dict:
-    """Crea una nueva conversación vinculada al usuario o sesión actual."""
-    target_user = (payload.user_id if payload and payload.user_id else None) or user_id
-    title = (payload.title if payload and payload.title else "Nuevo chat").strip()
-    title = " ".join(title.split())[:120] or "Nuevo chat"
+    """Crea una nueva conversación vinculada a la sesión actual."""
+    target_user = (payload.user_id if payload and payload.user_id else None) or session_id
+    plain_title = (payload.title if payload and payload.title else "Nuevo chat").strip()
+    plain_title = " ".join(plain_title.split())[:120] or "Nuevo chat"
+    enc_title = encrypt_text(plain_title)
+
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                insert into public.chats (title, user_id)
-                values (%s, %s)
-                returning id::text as id, title, user_id, created_at, updated_at
+                insert into public.chats (title, user_id, session_id)
+                values (%s, %s, %s)
+                returning id::text as id, title, user_id, session_id, created_at, updated_at
                 """,
-                (title, target_user),
+                (enc_title, target_user, session_id),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            if row:
+                row["title"] = plain_title
+            return row
 
 
 @router.get("/{chat_id}/progress")
-def chat_progress(chat_id: str) -> dict:
+def chat_progress(
+    chat_id: str,
+    session_id: str = Depends(get_current_session_id),
+) -> dict:
     """Consulta el nodo activo y progreso en streaming del agente para un chat."""
     chat_id_clean = validate_chat_uuid(chat_id)
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "select 1 from public.chats where id = %s and (session_id = %s or user_id = %s)",
+                (chat_id_clean, session_id, session_id),
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Chat no encontrado.")
     return get_progress(chat_id_clean) or {"node": None, "status": "idle"}
 
 
 @router.get("/{chat_id}/messages")
-def list_messages(chat_id: str) -> list[dict]:
-    """Obtiene el historial cronológico de mensajes de un chat."""
+def list_messages(
+    chat_id: str,
+    session_id: str = Depends(get_current_session_id),
+) -> list[dict]:
+    """Obtiene el historial cronológico de mensajes descifrados de un chat."""
     chat_id_clean = validate_chat_uuid(chat_id)
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("select id from public.chats where id = %s", (chat_id_clean,))
+            cur.execute(
+                "select id from public.chats where id = %s and (session_id = %s or user_id = %s)",
+                (chat_id_clean, session_id, session_id),
+            )
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Chat no encontrado.")
 
@@ -106,12 +134,21 @@ def list_messages(chat_id: str) -> list[dict]:
                 """,
                 (chat_id_clean,),
             )
-            return list(cur.fetchall())
+            messages = list(cur.fetchall())
+            for msg in messages:
+                if msg.get("content"):
+                    msg["content"] = decrypt_text(msg["content"])
+            return messages
 
 
 @router.post("/{chat_id}/messages")
-def send_message(chat_id: str, payload: MessageCreate, request: Request) -> dict:
-    """Envía un mensaje al agente RAG, ejecuta el grafo y guarda la respuesta trazable."""
+def send_message(
+    chat_id: str,
+    payload: MessageCreate,
+    request: Request,
+    session_id: str = Depends(get_current_session_id),
+) -> dict:
+    """Envía un mensaje al agente RAG, ejecuta el grafo y guarda la respuesta cifrada en reposo."""
     chat_id_clean = validate_chat_uuid(chat_id)
     content = payload.content.strip()
     if not content:
@@ -122,30 +159,35 @@ def send_message(chat_id: str, payload: MessageCreate, request: Request) -> dict
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "select id, title from public.chats where id = %s",
-                (chat_id_clean,),
+                "select id, title from public.chats where id = %s and (session_id = %s or user_id = %s)",
+                (chat_id_clean, session_id, session_id),
             )
             chat = cur.fetchone()
             if not chat:
                 raise HTTPException(status_code=404, detail="Chat no encontrado.")
 
+            enc_user_content = encrypt_text(content)
             cur.execute(
                 """
                 insert into public.messages (chat_id, role, content, metadata)
                 values (%s, 'user', %s, %s)
                 returning id::text as id, created_at
                 """,
-                (chat_id_clean, content, Jsonb({"source": "web"})),
+                (chat_id_clean, enc_user_content, Jsonb({"source": "web"})),
             )
             user_message = cur.fetchone()
+            if user_message:
+                user_message["content"] = content
 
-            current_title = chat.get("title")
+            raw_title = chat.get("title")
+            current_title = decrypt_text(raw_title) if raw_title else ""
             if not current_title or current_title == "Nuevo chat":
                 current_title = " ".join(content.split())[:60]
-            cur.execute(
-                "update public.chats set title = %s, updated_at = now() where id = %s",
-                (current_title, chat_id_clean),
-            )
+                enc_title = encrypt_text(current_title)
+                cur.execute(
+                    "update public.chats set title = %s, updated_at = now() where id = %s",
+                    (enc_title, chat_id_clean),
+                )
 
     clear_progress(chat_id_clean)
     try:
@@ -236,6 +278,9 @@ def send_message(chat_id: str, payload: MessageCreate, request: Request) -> dict
         "generated_report": result.get("generated_report"),
     }
 
+    answer_text = result.get("answer") or ABSTENTION
+    enc_assistant_content = encrypt_text(answer_text)
+
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -248,7 +293,7 @@ def send_message(chat_id: str, payload: MessageCreate, request: Request) -> dict
                 """,
                 (
                     chat_id_clean,
-                    result.get("answer") or ABSTENTION,
+                    enc_assistant_content,
                     Jsonb(_json_safe(citations)),
                     settings.groq_model_answer,
                     Jsonb({}),
@@ -256,6 +301,8 @@ def send_message(chat_id: str, payload: MessageCreate, request: Request) -> dict
                 ),
             )
             assistant_message = cur.fetchone()
+            if assistant_message:
+                assistant_message["content"] = answer_text
             cur.execute(
                 "update public.chats set updated_at = now() where id = %s",
                 (chat_id_clean,),
@@ -265,7 +312,7 @@ def send_message(chat_id: str, payload: MessageCreate, request: Request) -> dict
         "chat_id": chat_id_clean,
         "user_message": user_message,
         "assistant_message": assistant_message,
-        "answer": result.get("answer") or ABSTENTION,
+        "answer": answer_text,
         "citations": citations,
         "abstained": abstained,
         "verified": verified,
@@ -280,14 +327,14 @@ def send_message(chat_id: str, payload: MessageCreate, request: Request) -> dict
 @router.delete("", status_code=204)
 def delete_all_chats(
     request: Request,
-    user_id: str = Depends(get_current_user_id),
+    session_id: str = Depends(get_current_session_id),
 ) -> Response:
-    """Elimina todas las conversaciones del usuario activo y vacía sus hilos en el checkpointer."""
+    """Elimina todas las conversaciones de la sesión activa y vacía sus hilos en el checkpointer."""
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "select id::text as id from public.chats where user_id = %s",
-                (user_id,),
+                "select id::text as id from public.chats where session_id = %s or user_id = %s",
+                (session_id, session_id),
             )
             chat_ids = [row["id"] for row in cur.fetchall()]
             if chat_ids:
@@ -314,14 +361,26 @@ def delete_all_chats(
 def delete_chat(
     chat_id: str,
     request: Request,
-    user_id: str = Depends(get_current_user_id),
+    session_id: str = Depends(get_current_session_id),
 ) -> Response:
-    """Elimina una conversación específica por su UUID."""
+    """Elimina una conversación específica perteneciente a la sesión activa."""
     chat_id_clean = validate_chat_uuid(chat_id)
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("delete from public.messages where chat_id = %s", (chat_id_clean,))
-            cur.execute("delete from public.chats where id = %s", (chat_id_clean,))
+            cur.execute(
+                """
+                delete from public.messages 
+                where chat_id = %s and exists (
+                    select 1 from public.chats 
+                    where id = %s and (session_id = %s or user_id = %s)
+                )
+                """,
+                (chat_id_clean, chat_id_clean, session_id, session_id),
+            )
+            cur.execute(
+                "delete from public.chats where id = %s and (session_id = %s or user_id = %s)",
+                (chat_id_clean, session_id, session_id),
+            )
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Chat no encontrado.")
 

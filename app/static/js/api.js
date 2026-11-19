@@ -1,14 +1,27 @@
+import { storage } from "./storage.js";
+
 /**
  * Cliente HTTP estructurado para la API del Agente Alpina.
  */
 export async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
+  try {
+    const sessionId = storage.cookies.getSessionId();
+    if (sessionId && !headers["X-Session-Id"]) {
+      headers["X-Session-Id"] = sessionId;
+    }
+  } catch {}
+
   if (options.body && typeof options.body === "object" && !(options.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(options.body);
   }
 
-  const response = await fetch(path, { ...options, headers });
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    ...options,
+    headers,
+  });
 
   if (!response.ok) {
     let detail = `Error ${response.status}`;

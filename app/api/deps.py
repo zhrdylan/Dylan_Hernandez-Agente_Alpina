@@ -32,18 +32,25 @@ def get_agent_graph(request: Request) -> Any:
     return graph
 
 
-def get_current_user_id(request: Request) -> str:
-    """Extrae y normaliza el identificador de usuario o sesión desde encabezados, cookies o query params."""
-    user_id = (
-        request.headers.get("x-user-id")
-        or request.headers.get("x-session-id")
+def get_current_session_id(request: Request) -> str:
+    """Extrae, valida y sanitiza el identificador de sesión anónima (X-Session-Id o alpina_session_id)."""
+    session_id = (
+        request.headers.get("x-session-id")
+        or request.cookies.get("alpina_session_id")
+        or request.headers.get("x-user-id")
         or request.cookies.get("alpina_user_id")
         or request.cookies.get("alpina_device_id")
+        or request.query_params.get("session_id")
         or request.query_params.get("user_id")
     )
-    clean = str(user_id or "default").strip()
+    clean = str(session_id or "default").strip()
     clean = "".join(c for c in clean if c.isalnum() or c in "-_.")[:64]
     return clean or "default"
+
+
+def get_current_user_id(request: Request) -> str:
+    """Extrae y normaliza el identificador de usuario o sesión para compatibilidad retroactiva."""
+    return get_current_session_id(request)
 
 
 def get_checkpointer(request: Request) -> Any:
