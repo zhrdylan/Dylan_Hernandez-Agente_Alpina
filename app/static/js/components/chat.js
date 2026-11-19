@@ -85,21 +85,26 @@ export function createMessageElement(msg) {
   const report = msg.metadata?.generated_report || msg.generated_report;
   if (!isUser && report) {
     const isPdf = report.report_type === "pdf";
+    const isDocx = report.report_type === "docx";
+    const docTypeName = isPdf ? "Documento PDF Oficial" : (isDocx ? "Documento Word Oficial" : "Libro Excel Analítico");
+    const docIcon = isPdf ? "file-text" : (isDocx ? "file" : "file-spreadsheet");
+    const downloadLabel = isPdf ? "PDF" : (isDocx ? "Word" : "Excel");
+
     const reportCard = document.createElement("div");
     reportCard.className = "report-hero-card";
     reportCard.innerHTML = `
       <div class="report-hero-badge">
         <span class="report-hero-type">
-          <i data-lucide="${isPdf ? 'file-text' : 'file-spreadsheet'}" class="ui-icon"></i>
-          <span>${isPdf ? "Documento PDF Oficial" : "Libro Excel Analítico"}</span>
+          <i data-lucide="${docIcon}" class="ui-icon"></i>
+          <span>${docTypeName}</span>
         </span>
         <span class="report-hero-status">
-          <i data-lucide="sparkles" class="ui-icon"></i>
-          <span>Generado con Tool Calling</span>
+          <i data-lucide="check-circle" class="ui-icon"></i>
+          <span>Oficial</span>
         </span>
       </div>
       <div class="report-hero-title">${escapeHtml(report.title || "Informe Oficial · Alpina")}</div>
-      <div class="report-hero-meta">Archivo: <code>${escapeHtml(report.filename || "informe")}</code> · Verificado 100% trazable</div>
+      <div class="report-hero-meta">Archivo: <code>${escapeHtml(report.filename || "informe")}</code> · Verificado con fuentes oficiales</div>
       <div class="report-hero-actions">
         ${isPdf ? `
           <button class="report-hero-btn preview" type="button">
@@ -109,7 +114,7 @@ export function createMessageElement(msg) {
         ` : ''}
         <a class="report-hero-btn download" href="${report.download_url}" download="${report.filename || 'reporte'}">
           <i data-lucide="download" class="ui-icon"></i>
-          <span>Descargar ${isPdf ? "PDF" : "Excel"}</span>
+          <span>Descargar ${downloadLabel}</span>
         </a>
       </div>
     `;

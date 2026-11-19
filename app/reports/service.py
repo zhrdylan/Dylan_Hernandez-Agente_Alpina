@@ -25,9 +25,9 @@ def create_report_record(
     abstained: bool = False,
     category: str = "",
 ) -> dict[str, Any]:
-    """Crea y registra formalmente un reporte (PDF o XLSX) para una consulta y respuesta dadas."""
+    """Crea y registra formalmente un reporte (PDF, XLSX o DOCX) para una consulta y respuesta dadas."""
     report_type_clean = str(report_type or "pdf").lower().strip()
-    if report_type_clean not in {"pdf", "xlsx"}:
+    if report_type_clean not in {"pdf", "xlsx", "docx"}:
         report_type_clean = "pdf"
 
     clean_citations: list[ReportCitation] = []
@@ -116,18 +116,10 @@ def create_report_record(
         report_subtitle = f"Marco regulatorio oficial: {q_clean[:80]}"
         analysis_heading = "Disposiciones Normativas y Requisitos Sanitarios"
         sections = [
-            ReportSection(heading="Consulta Solicitada", body=[q_clean]),
             ReportSection(
                 heading=analysis_heading,
                 body=answer_paragraphs or ([answer] if not answer_bullets else []),
                 bullets=answer_bullets,
-            ),
-            ReportSection(
-                heading="Trazabilidad y Fundamentación Oficial",
-                body=[
-                    f"Informe generado por el Agente Alpina con estado de verificación: {verification_status}. "
-                    "Las afirmaciones contenidas en este documento están respaldadas por versiones oficiales vigentes."
-                ],
             ),
         ]
     elif product_rows or category == "product" or any(k in q_lower for k in ("yogurt", "queso", "leche", "finesse", "griego", "producto", "precio", "ean", "proteina", "proteína")):
@@ -135,18 +127,10 @@ def create_report_record(
         report_subtitle = f"Catálogo oficial de productos: {q_clean[:80]}"
         analysis_heading = "Ficha Oficial de Productos y Claims Nutricionales"
         sections = [
-            ReportSection(heading="Consulta Solicitada", body=[q_clean]),
             ReportSection(
                 heading=analysis_heading,
                 body=answer_paragraphs or ([answer] if not answer_bullets else []),
                 bullets=answer_bullets,
-            ),
-            ReportSection(
-                heading="Trazabilidad y Fundamentación Oficial",
-                body=[
-                    f"Informe generado por el Agente Alpina con estado de verificación: {verification_status}. "
-                    "Las afirmaciones contenidas en este documento están respaldadas por versiones oficiales vigentes."
-                ],
             ),
         ]
     else:
@@ -155,18 +139,10 @@ def create_report_record(
         report_subtitle = f"Respuesta trazable oficial: {q_clean[:80]}"
         analysis_heading = "Síntesis y Hallazgos Documentales Oficiales"
         sections = [
-            ReportSection(heading="Consulta Solicitada", body=[q_clean]),
             ReportSection(
                 heading=analysis_heading,
                 body=answer_paragraphs or ([answer] if not answer_bullets else []),
                 bullets=answer_bullets,
-            ),
-            ReportSection(
-                heading="Trazabilidad y Fundamentación Oficial",
-                body=[
-                    f"Informe generado por el Agente Alpina con estado de verificación: {verification_status}. "
-                    "Las afirmaciones contenidas en este documento están respaldadas por versiones oficiales vigentes."
-                ],
             ),
         ]
     if product_rows:
@@ -247,11 +223,12 @@ def create_report_record(
     if R2Storage.is_configured():
         def _bg_sync(rep_id: str, art_path: Path, s_key: str, r_type: str, r_title: str):
             try:
-                content_type = (
-                    "application/pdf"
-                    if r_type == "pdf"
-                    else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                if r_type == "docx":
+                    content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                elif r_type == "xlsx":
+                    content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                else:
+                    content_type = "application/pdf"
                 R2Storage().upload_file(
                     art_path,
                     s_key,

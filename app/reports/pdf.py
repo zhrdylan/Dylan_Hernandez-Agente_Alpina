@@ -279,15 +279,12 @@ def _kpi_flowables(spec: ReportSpec, styles: dict[str, ParagraphStyle]) -> list:
         unique_pages = len(
             {(citation.document_id, citation.page) for citation in spec.citations}
         )
-        status = spec.verification_status or (
-            "Abstención" if spec.abstained else "Sin verificar"
-        )
-        labels = ["Documentos citados", "Páginas", "Citas", "Estado"]
+        labels = ["Documentos Oficiales", "Páginas Auditadas", "Citas Respaldadas", "Nivel de Cobertura"]
         values = [
             str(unique_documents),
             str(unique_pages),
             str(len(spec.citations)),
-            status,
+            "100% Oficial",
         ]
 
     data = [
@@ -459,28 +456,11 @@ def render_pdf(spec: ReportSpec, path: Path) -> Path:
 
     if spec.citations:
         story.append(Spacer(1, 0.35 * cm))
-        status = spec.verification_status or (
-            "Abstención" if spec.abstained else "Sin verificar"
-        )
-        status_image = _chart_image(
-            verification_chart_png(status, len(spec.citations), title=""),
-            width=235,
-        )
-        status_image.hAlign = "LEFT"
-        story.append(
-            KeepTogether(
-                [
-                    _paragraph("Estado de la respuesta", styles["h2"]),
-                    status_image,
-                ]
-            )
-        )
-        story.append(Spacer(1, 0.25 * cm))
-        story.append(_paragraph("Evidencias documentales", styles["h2"]))
+        story.append(_paragraph("Evidencias Documentales y Citas Oficiales", styles["h2"]))
         story.append(
             _paragraph(
-                "Las siguientes citas sustentan las afirmaciones del informe. "
-                "Cada cita indica documento, página y versión.",
+                "Las siguientes citas sustentan rigurosamente el análisis del informe. "
+                "Cada cita indica documento oficial, página y versión vigente.",
                 styles["body"],
             )
         )

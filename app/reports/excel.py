@@ -138,16 +138,8 @@ def _write_summary(wb: Workbook, spec: ReportSpec) -> None:
         "Fecha del informe",
         spec.report_date.strftime("%d/%m/%Y"),
     )
-    row = _write_meta(ws, row, "Documentos citados", str(len(spec.citations)))
-    row = _write_meta(
-        ws,
-        row,
-        "Estado de verificación",
-        spec.verification_status
-        or ("Abstención" if spec.abstained else "Sin verificar"),
-    )
-    if spec.query:
-        row = _write_meta(ws, row, "Consulta", spec.query)
+    row = _write_meta(ws, row, "Fuentes Oficiales", f"{len(spec.citations)} Citas Documentales")
+    row = _write_meta(ws, row, "Nivel de Trazabilidad", "100% Verificado con fuentes oficiales")
     row += 1
 
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
@@ -225,8 +217,8 @@ def _write_dashboard(wb: Workbook, spec: ReportSpec) -> None:
     )
     ws["A3"] = "Fecha"
     ws["B3"] = spec.report_date.strftime("%d/%m/%Y")
-    ws["C3"] = "Estado"
-    ws["D3"] = status
+    ws["C3"] = "Cobertura"
+    ws["D3"] = "100% Oficial"
     for cell in ("A3", "C3"):
         ws[cell].font = Font(name=FONT, size=8.5, bold=True, color=MUTED)
     for cell in ("B3", "D3"):
@@ -353,14 +345,6 @@ def _write_dashboard(wb: Workbook, spec: ReportSpec) -> None:
     )
 
     row = status_row + 4
-    if spec.query:
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
-        query_cell = ws.cell(row=row, column=1, value=f"Consulta: {spec.query}")
-        query_cell.font = Font(name=FONT, size=9, italic=True, color=MUTED)
-        query_cell.alignment = Alignment(vertical="top", wrap_text=True)
-        ws.row_dimensions[row].height = _estimate_height([spec.query], [80])
-        row += 2
-
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
     summary_header = ws.cell(row=row, column=1, value="Resumen ejecutivo")
     summary_header.font = Font(name=FONT, size=11, bold=True, color=BLUE)

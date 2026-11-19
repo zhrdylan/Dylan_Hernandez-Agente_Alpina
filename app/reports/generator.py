@@ -8,8 +8,9 @@ from app.config import REPORTS_DIR
 from app.reports.excel import render_xlsx
 from app.reports.pdf import render_pdf
 from app.reports.spec import ReportSpec
+from app.reports.word import render_docx
 
-VALID_REPORT_TYPES = {"pdf", "xlsx"}
+VALID_REPORT_TYPES = {"pdf", "xlsx", "docx"}
 
 
 class ReportGenerationError(RuntimeError):
@@ -45,6 +46,8 @@ def generate_report(
 
     if report_type == "pdf":
         render_pdf(spec, path)
+    elif report_type == "docx":
+        render_docx(spec, path)
     else:
         render_xlsx(spec, path)
 

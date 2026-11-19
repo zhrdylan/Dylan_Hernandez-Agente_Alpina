@@ -93,12 +93,8 @@ def get_balance_summary_table() -> ReportTable:
 
 
 def get_financial_sections(query: str, answer_paragraphs: list[str], answer_bullets: list[str]) -> list[ReportSection]:
-    """Genera las secciones documentales y tablas formales para reportes financieros."""
+    """Genera las secciones documentales y tablas formales para reportes financieros de alta dirección."""
     return [
-        ReportSection(
-            heading="Consulta Solicitada",
-            body=[query or "Resultados financieros y estado comercial"],
-        ),
         ReportSection(
             heading="Resumen Ejecutivo y Análisis de Desempeño Financiero",
             body=answer_paragraphs or ["Desglose oficial de resultados financieros de Alpina."],
@@ -123,11 +119,11 @@ def get_financial_sections(query: str, answer_paragraphs: list[str], answer_bull
             table=get_balance_summary_table(),
         ),
         ReportSection(
-            heading="Trazabilidad y Fundamentación Oficial",
+            heading="Recomendaciones Estratégicas y Próximos Pasos",
             body=[
-                "Informe financiero generado automáticamente por el Agente Alpina con base en los documentos C4 y C5. "
-                "Cifras expresadas en miles de pesos colombianos (COP), preparadas conforme a las Normas de Contabilidad "
-                "y de Información Financiera aceptadas en Colombia (NCIF / NIIF)."
+                "Con base en el desempeño reportado (+6,3% en ingresos y margen EBITDA de 15,0%), se recomienda "
+                "priorizar la optimización logística de la cadena de frío, potenciar los formatos de mayor rotación y "
+                "mantener la disciplina de cobertura cambiaria y compras anticipadas de insumos lácteos."
             ],
         ),
     ]

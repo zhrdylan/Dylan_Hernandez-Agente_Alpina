@@ -12,6 +12,7 @@ from app.agent.prompts import ABSTENTION
 from app.api.deps import chat_uuid as validate_chat_uuid, report_uuid as validate_report_uuid
 from app.api.schemas.reports import ReportRequest
 from app.config import REPORTS_DIR
+from app.core.crypto import decrypt_text
 from app.db.connection import connect
 from app.reports.service import create_report_record
 from app.reports.spec import ReportCitation
@@ -94,11 +95,16 @@ def create_report(chat_id: str, payload: ReportRequest) -> dict:
         )
     )
 
+    raw_answer = assistant.get("content") or ABSTENTION
+    raw_question = (user_message or {}).get("content") or "Consulta documental"
+    clean_answer = decrypt_text(raw_answer)
+    clean_question = decrypt_text(raw_question)
+
     try:
         return create_report_record(
             chat_id=chat_id_clean,
-            question=(user_message or {}).get("content") or "Consulta documental",
-            answer=assistant.get("content") or ABSTENTION,
+            question=clean_question,
+            answer=clean_answer,
             citations=citations,
             report_type=payload.report_type,
             verification_status=verification_status,
@@ -135,12 +141,13 @@ def download_report(report_id: str, inline: bool = False) -> Response:
     if not isinstance(metadata, dict):
         metadata = {}
 
-    report_type = report.get("report_type")
-    media_type = (
-        "application/pdf"
-        if report_type == "pdf"
-        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    report_type = str(report.get("report_type") or "pdf").lower()
+    if report_type == "docx":
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif report_type == "xlsx":
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        media_type = "application/pdf"
     filename = Path(str(metadata.get("filename") or "reporte")).name
     disposition = "inline" if inline else "attachment"
 

@@ -5,4 +5,4 @@ from pydantic import BaseModel
 
 
 class ReportRequest(BaseModel):
-    report_type: Literal["pdf", "xlsx"]
+    report_type: Literal["pdf", "xlsx", "docx"]
