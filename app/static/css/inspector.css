@@ -1,0 +1,200 @@
+/* Live Citation Side Drawer */
+.citation-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(11, 31, 58, 0.45);
+  backdrop-filter: blur(2px);
+  z-index: 1100;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition-normal);
+}
+
+.citation-drawer-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.citation-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 480px;
+  max-width: 90vw;
+  background: #ffffff;
+  box-shadow: -5px 0 30px rgba(0, 0, 0, 0.15);
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform var(--transition-normal);
+  border-left: 1px solid var(--line);
+}
+
+.citation-drawer.open {
+  transform: translateX(0);
+}
+
+.drawer-header {
+  padding: 18px 22px;
+  background: linear-gradient(135deg, var(--sidebar) 0%, var(--sidebar-2) 100%);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.drawer-header h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.drawer-header p {
+  margin: 3px 0 0;
+  font-size: 0.76rem;
+  color: var(--sidebar-muted);
+}
+
+.drawer-close {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  transition: background var(--transition-fast);
+}
+
+.drawer-close .ui-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.drawer-close:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  background: #f8fafc;
+}
+
+.drawer-quote-card {
+  background: #ffffff;
+  border: 1px solid var(--blue-border);
+  border-left: 4px solid var(--blue);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+.drawer-quote-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--blue);
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.drawer-quote-text {
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--ink);
+  font-style: italic;
+  margin: 0;
+}
+
+.drawer-copy-btn {
+  font-size: 0.72rem;
+  color: var(--blue);
+  background: var(--blue-light);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all var(--transition-fast);
+}
+
+.drawer-copy-btn .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+.drawer-copy-btn:hover {
+  background: var(--blue);
+  color: #ffffff;
+}
+
+.drawer-page-view {
+  background: #1e293b;
+  border-radius: var(--radius-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  position: relative;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.drawer-page-img {
+  max-width: 100%;
+  max-height: 520px;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  transition: opacity 0.25s ease-in-out, transform var(--transition-fast);
+}
+
+.drawer-hint {
+  font-size: 0.74rem;
+  color: var(--muted);
+  text-align: center;
+  margin: 0;
+}
+
+/* Markdown rendered styling inside bubbles */
+.md-h2 { font-size: 1.15rem; font-weight: 800; color: var(--blue); margin: 12px 0 6px; }
+.md-h3 { font-size: 1.05rem; font-weight: 700; color: var(--ink); margin: 10px 0 5px; }
+.md-h4 { font-size: 0.95rem; font-weight: 700; color: var(--ink); margin: 8px 0 4px; }
+.md-bold { font-weight: 700; color: var(--ink); }
+.md-italic { font-style: italic; }
+.md-list { margin: 6px 0 10px 20px; padding: 0; }
+.md-list li { margin-bottom: 4px; line-height: 1.45; }
+.md-p { margin: 0 0 10px; line-height: 1.55; }
+.md-p:last-child { margin-bottom: 0; }
+.md-inline-code {
+  background: #f1f5f9;
+  color: var(--blue);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.84em;
+  font-family: monospace;
+}
+.md-code-block {
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  font-size: 0.84em;
+  margin: 8px 0;
+}

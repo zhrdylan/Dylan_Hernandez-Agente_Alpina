@@ -1,0 +1,62 @@
+========================================================================
+             AGENTE RAG DE ALPINA - GUÍA DE INICIO RÁPIDO
+========================================================================
+
+¡Bienvenido! Este proyecto está empaquetado para ejecutarse en cualquier
+computador con Windows de forma directa y automática.
+
+------------------------------------------------------------------------
+1. REQUISITOS PREVIOS
+------------------------------------------------------------------------
+- Tener instalado Python (versiones recomendadas: 3.10, 3.11, 3.12 o 3.13)
+  Descárgalo de: https://www.python.org/downloads/
+  * IMPORTANTE: Al instalar, marca la casilla "Add python.exe to PATH"
+    en la parte inferior de la primera ventana del instalador.
+- Conexión a internet (para comunicarse con las APIs del agente y Supabase).
+- No requiere Docker ni PostgreSQL local (la base de datos con los vectores
+  de embeddings ya está alojada y configurada en Supabase en la nube).
+
+------------------------------------------------------------------------
+2. CÓMO INICIAR (1 SOLO CLIC)
+------------------------------------------------------------------------
+Simplemente haz doble clic sobre el archivo:
+
+    👉 iniciar.bat
+
+El script se encargará automáticamente de todo:
+  1. Detectará tu instalación de Python.
+  2. Creará el entorno virtual local (.venv).
+  3. Instalará las librerías necesarias desde requirements.txt.
+  4. Verificará las credenciales del archivo .env.
+  5. Abrirá automáticamente tu navegador en http://127.0.0.1:8000.
+  6. Iniciará el servidor web del asistente.
+
+------------------------------------------------------------------------
+3. ¿QUÉ PUEDES PROBAR EN EL SISTEMA?
+------------------------------------------------------------------------
+1. Consulta de Productos:
+   - "Dime el precio, ingredientes y tabla nutricional de Alpinito de Fresa"
+   - "¿Qué productos de Alpina no tienen sellos de advertencia frontal?"
+
+2. Normativa Alimentaria en Colombia:
+   - "¿Cuáles son los límites de sodio según la Resolución 810 de 2021?"
+   - "¿Qué modificó la Resolución 2492 de 2022 respecto al rotulado?"
+
+3. Generación Automática de Reportes Ejecutivos (Tool Calling):
+   - "Genérame un reporte financiero en excel con los resultados de 2025"
+   - "Crea un informe en PDF de la Resolución 810"
+   - Podrás ver la tarjeta de descarga directamente en la burbuja de chat,
+     o abrir el Dossier Ejecutivo para ver la vista previa interactiva
+     del PDF o descargar el archivo Excel estructurado con sus gráficos.
+
+4. Trazabilidad 100% Auditable:
+   - En cada respuesta puedes hacer clic en las "Fuentes Oficiales Citadas"
+     para abrir el visor lateral y ver el fragmento de texto exacto
+     resaltado en el documento PDF original sin alucinaciones.
+
+------------------------------------------------------------------------
+4. ¿CÓMO DETENER EL SERVIDOR?
+------------------------------------------------------------------------
+En la ventana negra de la consola donde se ejecuta el servidor, presiona:
+Ctrl + C y confirma con 'S' (o simplemente cierra la ventana).
+========================================================================
