@@ -76,7 +76,13 @@ def document_page(
 ) -> Response:
     """Renderiza la imagen PNG de la página solicitada con resaltado de la cita citada."""
     try:
-        image = render_page_png(document_id, page_number, version=version, quote=quote)
+        image, meta = render_page_png(
+            document_id,
+            page_number,
+            version=version,
+            quote=quote,
+            return_meta=True,
+        )
     except PagePreviewError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -84,5 +90,8 @@ def document_page(
     return Response(
         content=image,
         media_type="image/png",
-        headers={"Cache-Control": cache_header},
+        headers={
+            "Cache-Control": cache_header,
+            "X-Highlight-Status": meta.get("highlight_status", "none"),
+        },
     )

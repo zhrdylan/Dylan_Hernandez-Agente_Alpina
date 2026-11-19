@@ -141,3 +141,107 @@ def test_empty_extraction_marked_as_failed():
         status = "complete"
         
     assert status == "failed"
+
+
+def test_r09_hybrid_search_combines_vector_and_fts():
+    """R09: hybrid_search must perform true hybrid search with FTS and vector RRF fusion."""
+    from app.retrieval.search import hybrid_search, SearchFilters
+
+    mock_conn = mock.MagicMock()
+    mock_vector = [
+        {
+            "chunk_id": "c_vec_1",
+            "document_id": "C4",
+            "document_title": "EEFF 2025",
+            "version_id": "v1",
+            "version": "2025",
+            "page_start": 2,
+            "page_end": 2,
+            "section": "P&L",
+            "content": "Ventas netas alcanzaron 2.4 billones",
+            "source_url": None,
+            "category": "corporate",
+            "doc_type": "informe",
+            "country": "CO",
+            "vigente": True,
+            "is_current": True,
+            "vector_score": 0.88,
+        }
+    ]
+    mock_fts = [
+        {
+            "chunk_id": "c_fts_1",
+            "document_id": "C4",
+            "document_title": "EEFF 2025",
+            "version_id": "v1",
+            "version": "2025",
+            "page_start": 4,
+            "page_end": 4,
+            "section": "Notas",
+            "content": "EBITDA consolidado de 368 mil millones",
+            "source_url": None,
+            "category": "corporate",
+            "doc_type": "informe",
+            "country": "CO",
+            "vigente": True,
+            "is_current": True,
+            "fts_score": 0.42,
+        }
+    ]
+
+    with mock.patch("app.retrieval.search._vector_rows", return_value=mock_vector), \
+         mock.patch("app.retrieval.search._fts_rows", return_value=mock_fts), \
+         mock.patch("app.retrieval.search.embed_query", return_value=[0.1] * 1024):
+        results = hybrid_search(mock_conn, "ventas ebitda", limit=5)
+        assert len(results) == 2
+        chunk_ids = {r.chunk_id for r in results}
+        assert "c_vec_1" in chunk_ids
+        assert "c_fts_1" in chunk_ids
+        assert all(r.rrf_score > 0 for r in results)
+
+
+def test_r09_reindex_triggered_when_embedding_model_differs():
+    """R09: When embeddings for the active model are missing or model changed, ingest_document reindexes."""
+    from app.ingestion.ingest import ingest_document
+
+    mock_conn = mock.MagicMock()
+    mock_cur = mock.MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+
+    record = {
+        "id": "C4",
+        "title": "EEFF 2025",
+        "category": "corporate",
+        "sha256": "abc123sha",
+        "version": "2025",
+        "page_count": 10,
+        "filename": "c4.pdf",
+        "effective_date": "2025-01-01",
+        "published_date": "2025-02-01",
+        "vigente": True,
+        "source_page": "",
+        "pdf_url": "",
+        "extraction_status": "complete",
+        "extracted_at": "2025-02-01T00:00:00Z",
+        "ocr_model": "test",
+        "stats": {"total_chars": 5000},
+        "pages": [{"page_number": 1, "text": "Reporte financiero con texto suficiente para chunks " * 10}],
+    }
+    manifest_doc = {"id": "C4", "title": "EEFF 2025", "category": "corporate", "sha256": "abc123sha"}
+
+    # Mock version exists with 5 chunks, but 0 embeddings for the active model!
+    with mock.patch("app.ingestion.ingest._fetch_version", return_value={"id": "v-uuid", "sha256": "abc123sha", "is_current": True}), \
+         mock.patch("app.ingestion.ingest._count_chunks", return_value=5), \
+         mock.patch("app.ingestion.ingest._count_model_embeddings", return_value=0), \
+         mock.patch("app.ingestion.ingest._replace_chunks") as mock_replace, \
+         mock.patch("app.ingestion.ingest._ensure_document"), \
+         mock.patch("app.ingestion.ingest._ensure_version"):
+
+        fake_embed_fn = mock.MagicMock(side_effect=lambda contents: [[0.1] * 1024 for _ in contents])
+        res = ingest_document(mock_conn, record, manifest_doc, embed_fn=fake_embed_fn)
+
+        # Must NOT skip! It must call embed_fn and _replace_chunks to reindex!
+        assert res.skipped is False
+        assert fake_embed_fn.called
+        assert mock_replace.called
+

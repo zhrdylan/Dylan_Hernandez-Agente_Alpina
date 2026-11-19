@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -103,9 +104,78 @@ PRODUCT_CONVERSATIONAL_WORDS = {
     "cuanto", "cuánto", "cuesta", "vale", "precio", "precios", "costo", "costos", "valor",
     "ingrediente", "ingredientes", "alergeno", "alergenos", "alérgeno", "alérgenos",
     "informacion", "información", "nutricional", "tabla", "ficha", "tecnica", "técnica",
+    "proteina", "proteína", "claims",
     "por", "favor", "gracias", "de", "del", "el", "la", "los", "las", "un", "una",
     "unos", "unas", "tiene", "contiene", "es", "son", "sobre", "en", "para", "con", "y", "o",
 }
+
+
+PROTEIN_DECLARATION_RE = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*g\s+de\s+prote[ií]na(?:\s+por\s+(?:porci[oó]n|\d+\s*(?:g|ml)))?",
+    re.IGNORECASE,
+)
+
+
+def catalog_nutrition_answer(query: str, results: list[dict]) -> dict | None:
+    """Responde con la declaración original cuando se pide proteína o claims de una ficha exacta."""
+    asked_protein = bool(re.search(r"\bprote[ií]nas?\b", query, re.IGNORECASE))
+    asked_claims = bool(re.search(r"\b(?:claims?|declaraciones nutricionales)\b", query, re.IGNORECASE))
+    if not (asked_protein or asked_claims) or re.search(
+        r"\b(?:compar\w*|vs|precio|calor[ií]as|grasas?|sodio|az[uú]car(?:es)?|ingredientes?|"
+        r"al[eé]rgenos?|ean|sellos?|tabla|disponibilidad)\b",
+        query,
+        re.IGNORECASE,
+    ):
+        return None
+
+    normalized = clean_search_query(query)
+    exact = [
+        result for result in results
+        if result.get("doc_type") == "producto"
+        and clean_search_query(result.get("document_title", ""))
+        and f" {clean_search_query(result['document_title'])} " in f" {normalized} "
+    ]
+    if len(exact) != 1:
+        return None
+
+    result = exact[0]
+    data = dict(line.split(": ", 1) for line in result["content"].splitlines() if ": " in line)
+    claims = data.get("Claims", "")
+    description = data.get("Descripción", "")
+    declaration = PROTEIN_DECLARATION_RE.search(claims) or PROTEIN_DECLARATION_RE.search(description)
+    answer = [f"**{result['document_title']}**"]
+    quotes = []
+    if asked_protein:
+        if declaration:
+            protein = declaration.group()
+            answer.append(f"La ficha declara **{protein}**.")
+            quotes.append(protein)
+        elif data.get("Proteína", "No consta") != "No consta":
+            answer.append(f"La ficha declara **{data['Proteína']} de proteína** y deja la base de esa cantidad sin especificar.")
+            quotes.append(f"Proteína: {data['Proteína']}")
+        else:
+            answer.append("La ficha deja la cantidad de proteína sin especificar.")
+            quotes.append("Proteína: No consta")
+    if asked_claims:
+        if claims and not claims.startswith("No consta"):
+            remaining = [item.strip() for item in claims.split(";") if item.strip()]
+            if asked_protein and declaration:
+                remaining = [item for item in remaining if declaration.group() not in item]
+            if remaining:
+                answer.append("\n".join(f"- {item}" for item in remaining))
+            quotes.append(claims)
+        else:
+            answer.append("La ficha deja las declaraciones nutricionales sin especificar.")
+            quotes.append("Claims:")
+
+    return {
+        "answer": "\n\n".join(answer),
+        "citations": [
+            {"document_id": result["document_id"], "page": result["page_start"], "quote": quote}
+            for quote in dict.fromkeys(quotes)
+        ],
+        "abstained": False,
+    }
 
 
 def _search_rows(

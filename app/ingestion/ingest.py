@@ -165,6 +165,20 @@ def _count_chunks(cur, version_id: Any) -> int:
     return int(row["count"]) if row else 0
 
 
+def _count_model_embeddings(cur, version_id: Any, model: str) -> int:
+    cur.execute(
+        """
+        select count(ce.id) as count
+        from public.chunks c
+        join public.chunk_embeddings ce on ce.chunk_id = c.id
+        where c.version_id = %s and ce.model = %s
+        """,
+        (version_id, model),
+    )
+    row = cur.fetchone()
+    return int(row["count"]) if row else 0
+
+
 def _ensure_document(cur, document: dict) -> None:
     cur.execute(
         """
@@ -419,6 +433,11 @@ def ingest_document(
     with conn.cursor(row_factory=dict_row) as cur:
         existing = _fetch_version(cur, document["id"], document["version"])
         existing_chunks = _count_chunks(cur, existing["id"]) if existing else 0
+        existing_embeddings = (
+            _count_model_embeddings(cur, existing["id"], settings.cohere_embed_model)
+            if existing
+            else 0
+        )
     if not conn.autocommit:
         conn.commit()
 
@@ -426,6 +445,7 @@ def ingest_document(
         existing
         and existing["sha256"] == document["sha256"]
         and existing_chunks > 0
+        and existing_embeddings == existing_chunks
         and not force
     ):
         if existing["is_current"]:

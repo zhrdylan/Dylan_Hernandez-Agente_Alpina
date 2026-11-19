@@ -57,22 +57,51 @@ export function openCitationDrawer(citation) {
     imgEl.style.opacity = "0";
     if (spinnerEl) spinnerEl.style.display = "block";
 
-    imgEl.onload = () => {
-      if (spinnerEl) spinnerEl.style.display = "none";
-      imgEl.style.opacity = "1";
-    };
-
-    imgEl.onerror = () => {
-      if (spinnerEl) spinnerEl.style.display = "none";
-      imgEl.style.opacity = "0.7";
-      console.warn("No se pudo cargar la vista previa para:", docId);
-    };
-
     const params = new URLSearchParams();
     if (version && version !== "vigente") params.set("version", version);
     if (quote) params.set("quote", quote);
     const qs = params.toString() ? `?${params.toString()}` : "";
-    imgEl.src = `/api/documents/${encodeURIComponent(docId)}/pages/${page}${qs}`;
+    const url = `/api/documents/${encodeURIComponent(docId)}/pages/${page}${qs}`;
+
+    fetch(url)
+      .then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || "La versión solicitada no está disponible.");
+        }
+        const hlStatus = res.headers.get("X-Highlight-Status") || "none";
+        if (hintEl) {
+          if (isProduct) {
+            hintEl.textContent = hlStatus === "exact"
+              ? "Coincidencia textual verificada en la ficha oficial del catálogo."
+              : "Referencia a producto en catálogo maestro oficial.";
+          } else {
+            if (hlStatus === "exact") {
+              hintEl.textContent = "Coincidencia textual exacta resaltada en la página del documento oficial.";
+            } else if (hlStatus === "partial") {
+              hintEl.textContent = "Coincidencia parcial o por fragmentos resaltada en el documento oficial.";
+            } else {
+              hintEl.textContent = "Página oficial de referencia (la cita exacta no tuvo coincidencia textual directa en esta página).";
+            }
+          }
+        }
+        return res.blob();
+      })
+      .then((blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        imgEl.onload = () => {
+          if (spinnerEl) spinnerEl.style.display = "none";
+          imgEl.style.opacity = "1";
+        };
+        imgEl.src = objectUrl;
+      })
+      .catch((err) => {
+        if (spinnerEl) spinnerEl.style.display = "none";
+        imgEl.style.opacity = "0.4";
+        if (hintEl) {
+          hintEl.textContent = `Aviso: ${err.message || "La versión histórica o página del documento no está disponible."}`;
+        }
+      });
   }
 
   drawer.classList.add("open");

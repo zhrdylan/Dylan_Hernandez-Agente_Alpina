@@ -252,7 +252,7 @@ def chunk_pages(
     current_section: str | None = None
 
     for raw_page in pages:
-        page_number = int(raw_page.get("page", 0))
+        page_number = int(raw_page.get("page") or raw_page.get("page_number") or 0)
         if page_number < 1:
             continue
         text = normalize_text(str(raw_page.get("text", "")))

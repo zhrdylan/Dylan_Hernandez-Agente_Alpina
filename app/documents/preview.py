@@ -125,6 +125,8 @@ def resolve_document_pdf(document_id: str, version: str | None = None) -> Path:
         r2_v_path = _r2_pdf_path(normalized, version=version)
         if r2_v_path and r2_v_path.is_file():
             return r2_v_path
+        # Si se solicitó una versión histórica específica y no existe, no caer en documento vigente
+        raise PagePreviewError(f"La versión {version} del documento {normalized} no está disponible.")
 
     # 3. Fallback a documento base local o lockfile
     cached_base = DOCUMENT_CACHE_DIR / f"{normalized}.pdf"
@@ -150,16 +152,16 @@ def _clean_tokens(text: str) -> list[str]:
     return [t for t in raw_tokens if t]
 
 
-def _quote_boxes(pdf_path: Path, page_number: int, quote: str) -> list[dict]:
+def _quote_boxes(pdf_path: Path, page_number: int, quote: str) -> tuple[list[dict], str]:
     tokens = _clean_tokens(quote)
     if not tokens:
-        return []
+        return [], "none"
 
     boxes: list[dict] = []
     try:
         with pdfplumber.open(pdf_path) as pdf:
             if page_number > len(pdf.pages):
-                return []
+                return [], "none"
             page = pdf.pages[page_number - 1]
 
             # Intento 1: Búsqueda regex completa con tolerancia a signos de puntuación, saltos de línea y mayúsculas
@@ -168,7 +170,7 @@ def _quote_boxes(pdf_path: Path, page_number: int, quote: str) -> list[dict]:
                 try:
                     matches = page.search(full_pattern, regex=True, case=False)
                     if matches:
-                        return matches
+                        return matches, "exact"
                 except Exception:
                     pass
 
@@ -196,7 +198,7 @@ def _quote_boxes(pdf_path: Path, page_number: int, quote: str) -> list[dict]:
                     continue
 
             if boxes:
-                return boxes
+                return boxes, "partial"
 
             # Intento 3: Respaldo por subfrases literales
             for candidate in [quote[:80], quote[-80:]]:
@@ -205,13 +207,13 @@ def _quote_boxes(pdf_path: Path, page_number: int, quote: str) -> list[dict]:
                     try:
                         matches = page.search(cand_clean, regex=False, case=False)
                         if matches:
-                            return matches
+                            return matches, "partial"
                     except Exception:
                         pass
     except Exception:
-        return []
+        return [], "none"
 
-    return boxes
+    return boxes, "none"
 
 
 def _highlight(image: Image.Image, boxes: list[dict], dpi: int) -> Image.Image:
@@ -235,7 +237,11 @@ def _highlight(image: Image.Image, boxes: list[dict], dpi: int) -> Image.Image:
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
 
-def render_product_sheet_png(product_id: str, quote: str | None = None) -> bytes:
+def render_product_sheet_png(
+    product_id: str,
+    quote: str | None = None,
+    return_meta: bool = False,
+) -> bytes | tuple[bytes, dict[str, Any]]:
     clean = str(product_id or "").strip()
     sku_val = clean.lower()
     sku_num = sku_val.replace("sku-", "").replace("product-", "")
@@ -246,7 +252,7 @@ def render_product_sheet_png(product_id: str, quote: str | None = None) -> bytes
         else "plain"
     )
     cache_path = CACHE_DIR / "products" / f"{sku_val}-{quote_key}.png"
-    if cache_path.is_file():
+    if cache_path.is_file() and not return_meta:
         return cache_path.read_bytes()
 
     with connect() as conn:
@@ -387,6 +393,13 @@ def render_product_sheet_png(product_id: str, quote: str | None = None) -> bytes
     payload = buffer.getvalue()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(payload)
+
+    status = "plain"
+    if quote:
+        status = "exact" if has_text_match else "none"
+
+    if return_meta:
+        return payload, {"highlight_status": status, "boxes_count": 1 if has_text_match else 0}
     return payload
 
 
@@ -397,23 +410,27 @@ def render_page_png(
     version: str | None = None,
     quote: str | None = None,
     dpi: int = PREVIEW_DPI,
-) -> bytes:
+    return_meta: bool = False,
+) -> bytes | tuple[bytes, dict[str, Any]]:
     normalized = str(document_id or "").strip().upper()
     if normalized.startswith("SKU-") or normalized.startswith("PRODUCT-"):
-        return render_product_sheet_png(normalized, quote=quote)
+        return render_product_sheet_png(normalized, quote=quote, return_meta=return_meta)
 
     if page_number < 1:
         raise PagePreviewError("La página debe ser mayor o igual a 1.")
 
     pdf_path = resolve_document_pdf(document_id, version=version)
+    pdf_stat = pdf_path.stat()
+    file_tag = f"{int(pdf_stat.st_mtime)}_{pdf_stat.st_size}"
     quote_key = (
         hashlib.sha256(" ".join((quote or "").split()).encode("utf-8")).hexdigest()[:16]
         if quote
         else "plain"
     )
     v_tag = f"v{version}_" if version else ""
-    cache_path = CACHE_DIR / normalized / f"{v_tag}p{page_number}-{quote_key}-{dpi}.png"
-    if cache_path.is_file():
+    cache_path = CACHE_DIR / normalized / f"{v_tag}p{page_number}-{quote_key}-{file_tag}-{dpi}.png"
+
+    if cache_path.is_file() and not return_meta:
         return cache_path.read_bytes()
 
     document = pdfium.PdfDocument(str(pdf_path))
@@ -431,8 +448,10 @@ def render_page_png(
     finally:
         document.close()
 
+    highlight_status = "plain"
+    boxes = []
     if quote:
-        boxes = _quote_boxes(pdf_path, page_number, quote)
+        boxes, highlight_status = _quote_boxes(pdf_path, page_number, quote)
         if boxes:
             image = _highlight(image, boxes, dpi)
 
@@ -441,6 +460,9 @@ def render_page_png(
     payload = buffer.getvalue()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(payload)
+
+    if return_meta:
+        return payload, {"highlight_status": highlight_status, "boxes_count": len(boxes)}
     return payload
 
 
