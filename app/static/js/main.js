@@ -66,6 +66,9 @@ async function loadChats() {
       const targetChat = chats.find(c => c.id === savedChatId) || chats[0];
       await selectChat(targetChat.id);
     } else {
+      state.activeChatId = null;
+      storage.local.setActiveChatId(null);
+      state.messages = [];
       renderMessages([], handleAsk);
     }
   } catch (err) {
@@ -150,22 +153,25 @@ async function handleAsk(content) {
   if (!content || state.isSending) return;
   state.isSending = true;
 
-  // Si no hay chat activo, crear uno
-  if (!state.activeChatId) {
-    const newChat = await api("/api/chats", { method: "POST", body: { title: content.slice(0, 40) } });
-    state.activeChatId = newChat.id;
-    state.chats.unshift(newChat);
-    renderChatList(state.chats);
-  }
-
-  // Agregar mensaje de usuario optimistamente
-  const userMsg = { role: "user", content, created_at: new Date().toISOString() };
-  state.messages.push(userMsg);
-  renderMessages(state.messages, handleAsk);
-  showTypingIndicator();
-
   try {
-    const res = await api(`/api/chats/${state.activeChatId}/messages`, {
+    // Si no hay chat activo, crear uno dentro del bloque protegido (F16)
+    if (!state.activeChatId) {
+      const newChat = await api("/api/chats", { method: "POST", body: { title: content.slice(0, 40) } });
+      state.activeChatId = newChat.id;
+      storage.local.setActiveChatId(newChat.id);
+      state.chats.unshift(newChat);
+      renderChatList(state.chats);
+    }
+
+    const targetChatId = state.activeChatId;
+
+    // Agregar mensaje de usuario optimistamente
+    const userMsg = { role: "user", content, created_at: new Date().toISOString() };
+    state.messages.push(userMsg);
+    renderMessages(state.messages, handleAsk);
+    showTypingIndicator();
+
+    const res = await api(`/api/chats/${targetChatId}/messages`, {
       method: "POST",
       body: { content },
     });
@@ -182,8 +188,12 @@ async function handleAsk(content) {
     if (assistantMsg.generated_report && !assistantMsg.metadata.generated_report) {
       assistantMsg.metadata.generated_report = assistantMsg.generated_report;
     }
-    state.messages.push(assistantMsg);
-    renderMessages(state.messages, handleAsk);
+
+    // Vincular respuesta a la conversación activa para evitar fuga de mensajes si el usuario cambió de chat (F16)
+    if (state.activeChatId === targetChatId) {
+      state.messages.push(assistantMsg);
+      renderMessages(state.messages, handleAsk);
+    }
 
     // Actualizar lista de chats
     const chats = await api("/api/chats");
@@ -220,8 +230,10 @@ function initSidebar() {
   document.getElementById("delete-chat")?.addEventListener("click", async () => {
     if (!state.activeChatId) return;
     if (!confirm("¿Deseas eliminar este chat?")) return;
+    const chatToDelete = state.activeChatId;
     storage.local.removeActiveChatId();
-    await api(`/api/chats/${state.activeChatId}`, { method: "DELETE" });
+    state.activeChatId = null;
+    await api(`/api/chats/${chatToDelete}`, { method: "DELETE" });
     await loadChats();
   });
 

@@ -33,19 +33,22 @@ def get_agent_graph(request: Request) -> Any:
 
 
 def get_current_session_id(request: Request) -> str:
-    """Extrae, valida y sanitiza el identificador de sesión anónima (X-Session-Id o alpina_session_id)."""
-    session_id = (
-        request.headers.get("x-session-id")
-        or request.cookies.get("alpina_session_id")
-        or request.headers.get("x-user-id")
-        or request.cookies.get("alpina_user_id")
-        or request.cookies.get("alpina_device_id")
-        or request.query_params.get("session_id")
-        or request.query_params.get("user_id")
-    )
-    clean = str(session_id or "default").strip()
-    clean = "".join(c for c in clean if c.isalnum() or c in "-_.")[:64]
-    return clean or "default"
+    """Extrae el identificador de sesión anónima validado del estado de la petición o cabecera/cookie."""
+    session_id = getattr(request.state, "session_id", None)
+    if session_id:
+        return session_id
+
+    # Fallback si no fue procesado por middleware (ej. llamadas internas o tests directos)
+    raw = request.headers.get("x-session-id") or request.cookies.get("alpina_session_id")
+    if raw and raw.strip().lower() not in {"default", "null", "undefined"}:
+        clean = "".join(c for c in raw.strip() if c.isalnum() or c in "-_.")[:64]
+        if len(clean) >= 8:
+            request.state.session_id = clean
+            return clean
+
+    new_sess = f"sess-{uuid.uuid4().hex}"
+    request.state.session_id = new_sess
+    return new_sess
 
 
 def get_current_user_id(request: Request) -> str:

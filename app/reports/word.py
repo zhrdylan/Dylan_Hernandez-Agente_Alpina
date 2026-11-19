@@ -175,7 +175,7 @@ def render_docx(spec: ReportSpec, path: Path | io.BytesIO | str) -> Path | io.By
         ("DESTINATARIO", spec.prepared_for or "Alta Dirección"),
         ("FECHA DE EMISIÓN", spec.report_date.strftime("%d/%m/%Y")),
         ("FUENTES CITADAS", f"{len(spec.citations)} Citas Oficiales"),
-        ("TRAZABILIDAD", "100% Verificado"),
+        ("TRAZABILIDAD", spec.verification_status or ("Abstención" if spec.abstained else "Verificado")),
     ]
 
     for idx, (lbl, val) in enumerate(kpis):
@@ -335,12 +335,12 @@ def render_docx(spec: ReportSpec, path: Path | io.BytesIO | str) -> Path | io.By
         r_cit.font.bold = True
         r_cit.font.color.rgb = COLOR_PRIMARY_BLUE
 
-        cit_table = doc.add_table(rows=len(spec.citations) + 1, cols=4)
+        cit_table = doc.add_table(rows=len(spec.citations) + 1, cols=5)
         cit_table.alignment = WD_TABLE_ALIGNMENT.CENTER
         _set_table_borders(cit_table)
 
         # Encabezado de citas
-        cit_headers = ["Doc ID", "Título del Documento Oficial", "Pág.", "Evidencia Textual Auditada"]
+        cit_headers = ["Doc ID", "Título del Documento Oficial", "Pág.", "Versión", "Evidencia Textual Auditada"]
         for c_idx, ch_text in enumerate(cit_headers):
             ch_cell = cit_table.cell(0, c_idx)
             _set_cell_background(ch_cell, HEX_PRIMARY_BLUE)
@@ -360,6 +360,7 @@ def render_docx(spec: ReportSpec, path: Path | io.BytesIO | str) -> Path | io.By
                 str(citation.document_id),
                 str(citation.title or citation.document_id),
                 str(citation.page or "1"),
+                str(citation.version or "vigente"),
                 f'"{citation.quote}"' if citation.quote else "Referencia oficial",
             ]
             for c_idx, val in enumerate(row_cells):

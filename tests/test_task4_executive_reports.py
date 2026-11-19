@@ -124,12 +124,16 @@ def test_api_generate_and_download_docx_report():
         assert report_data["report_type"] == "docx"
         report_id = report_data["report_id"]
 
-        # Download report
-        dl_resp = client.get(f"/api/reports/{report_id}/download")
+        # Download report with valid session
+        dl_resp = client.get(f"/api/reports/{report_id}/download", headers={"X-Session-Id": sess_id})
         assert dl_resp.status_code == 200
         assert dl_resp.headers["content-type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         assert len(dl_resp.content) > 1000
         assert dl_resp.content.startswith(b"PK\x03\x04")
+
+        # Download report with different session must be rejected (404)
+        dl_other = client.get(f"/api/reports/{report_id}/download", headers={"X-Session-Id": f"other-{sess_id}"})
+        assert dl_other.status_code == 404
 
     finally:
         client.delete(f"/api/chats/{chat_id}", headers={"X-Session-Id": sess_id})

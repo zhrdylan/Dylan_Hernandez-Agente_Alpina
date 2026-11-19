@@ -13,11 +13,17 @@ router = APIRouter(tags=["system"])
 @router.get("/health")
 def health(request: Request) -> dict[str, Any]:
     """Estado del servicio y del agente conversacional."""
+    startup_error = getattr(request.app.state, "startup_error", None)
+    agent_ready = getattr(request.app.state, "graph", None) is not None
+    if startup_error or not agent_ready:
+        status = "degraded" if agent_ready else "error"
+    else:
+        status = "ok"
     return {
-        "status": "ok",
+        "status": status,
         "environment": settings.app_env,
-        "agent_ready": getattr(request.app.state, "graph", None) is not None,
-        "startup_error": getattr(request.app.state, "startup_error", None),
+        "agent_ready": agent_ready,
+        "startup_error": startup_error,
     }
 
 

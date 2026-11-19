@@ -31,7 +31,7 @@ def _load_lock() -> dict:
     return payload.get("documents") or {}
 
 
-def _r2_pdf_path(document_id: str) -> Path | None:
+def _r2_pdf_path(document_id: str, version: str | None = None) -> Path | None:
     try:
         from app.storage.r2 import R2Storage, R2StorageError
 
@@ -39,20 +39,32 @@ def _r2_pdf_path(document_id: str) -> Path | None:
             return None
         with connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    select storage_key
-                    from public.document_versions
-                    where document_id = %s and is_current
-                    order by created_at desc
-                    limit 1
-                    """,
-                    (document_id,),
-                )
+                if version:
+                    cur.execute(
+                        """
+                        select storage_key
+                        from public.document_versions
+                        where document_id = %s and version = %s
+                        limit 1
+                        """,
+                        (document_id, str(version)),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        select storage_key
+                        from public.document_versions
+                        where document_id = %s and is_current
+                        order by created_at desc
+                        limit 1
+                        """,
+                        (document_id,),
+                    )
                 row = cur.fetchone()
         if not row or not row[0]:
             return None
-        target = DOCUMENT_CACHE_DIR / f"{document_id}.pdf"
+        v_tag = f"_v{version}" if version else ""
+        target = DOCUMENT_CACHE_DIR / f"{document_id}{v_tag}.pdf"
         if target.is_file():
             return target
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -97,24 +109,35 @@ def resolve_document_title(document_id: str) -> str:
     return normalized
 
 
-def resolve_document_pdf(document_id: str) -> Path:
+def resolve_document_pdf(document_id: str, version: str | None = None) -> Path:
     normalized = str(document_id or "").strip().upper()
     if not re.fullmatch(r"[NPC]\d{1,2}", normalized):
         raise PagePreviewError("Documento no válido para vista previa.")
 
-    # 1. Comprobar caché local de documentos
-    cached = DOCUMENT_CACHE_DIR / f"{normalized}.pdf"
-    if cached.is_file():
-        return cached
+    # 1. Comprobar caché local de versión específica o general
+    v_tag = f"_v{version}" if version else ""
+    cached_v = DOCUMENT_CACHE_DIR / f"{normalized}{v_tag}.pdf"
+    if cached_v.is_file():
+        return cached_v
 
-    # 2. Comprobar lockfile
+    # 2. Comprobar R2 con versión específica
+    if version:
+        r2_v_path = _r2_pdf_path(normalized, version=version)
+        if r2_v_path and r2_v_path.is_file():
+            return r2_v_path
+
+    # 3. Fallback a documento base local o lockfile
+    cached_base = DOCUMENT_CACHE_DIR / f"{normalized}.pdf"
+    if cached_base.is_file():
+        return cached_base
+
     lock_entry = _load_lock().get(normalized)
     if lock_entry and lock_entry.get("status") == "ok":
         local_path = BASE_DIR / str(lock_entry.get("local_path") or "")
         if local_path.is_file():
             return local_path
 
-    # 3. Comprobar R2
+    # 4. Fallback a R2 versión vigente
     r2_path = _r2_pdf_path(normalized)
     if r2_path and r2_path.is_file():
         return r2_path
@@ -123,7 +146,7 @@ def resolve_document_pdf(document_id: str) -> Path:
 
 
 def _clean_tokens(text: str) -> list[str]:
-    raw_tokens = [t.strip(" .,;:\"'()[]{}«»“”’‘¿?¡!-–—\r\n\t") for t in (text or "").split()]
+    raw_tokens = [t.strip(" .,;:\"'()[]{}«»“”’‘¿?¡!-–—\n\t") for t in (text or "").split()]
     return [t for t in raw_tokens if t]
 
 
@@ -344,7 +367,15 @@ def render_product_sheet_png(product_id: str, quote: str | None = None) -> bytes
         for ql in q_lines[:5]:
             draw.text((62, qy), ql, fill="#92400e", font=f_quote)
             qy += 20
-        draw.text((62, qy + 4), "Coincidencia exacta verificada en la base de datos oficial.", fill="#b45309", font=f_sm)
+        # Verificar si la cita coincide textualmente con algún atributo de la ficha (F10, F12)
+        full_prod_text = f"{name} {desc} {' '.join(c_list)} {pres} {row.get('ingredients') or ''} {row.get('allergens') or ''}".casefold()
+        has_text_match = bool(quote and quote.strip().casefold() in full_prod_text)
+        match_msg = (
+            "Coincidencia textual verificada en la ficha oficial."
+            if has_text_match
+            else "Referencia consultada (no coincide textualmente con campos de la ficha)."
+        )
+        draw.text((62, qy + 4), match_msg, fill="#b45309", font=f_sm)
 
     # Pie de página con verificación de trazabilidad
     draw.line([(45, H - 65), (W - 45, H - 65)], fill="#e2e8f0", width=1)
@@ -363,6 +394,7 @@ def render_page_png(
     document_id: str,
     page_number: int,
     *,
+    version: str | None = None,
     quote: str | None = None,
     dpi: int = PREVIEW_DPI,
 ) -> bytes:
@@ -373,13 +405,14 @@ def render_page_png(
     if page_number < 1:
         raise PagePreviewError("La página debe ser mayor o igual a 1.")
 
-    pdf_path = resolve_document_pdf(document_id)
+    pdf_path = resolve_document_pdf(document_id, version=version)
     quote_key = (
         hashlib.sha256(" ".join((quote or "").split()).encode("utf-8")).hexdigest()[:16]
         if quote
         else "plain"
     )
-    cache_path = CACHE_DIR / normalized / f"p{page_number}-{quote_key}-{dpi}.png"
+    v_tag = f"v{version}_" if version else ""
+    cache_path = CACHE_DIR / normalized / f"{v_tag}p{page_number}-{quote_key}-{dpi}.png"
     if cache_path.is_file():
         return cache_path.read_bytes()
 
@@ -399,7 +432,9 @@ def render_page_png(
         document.close()
 
     if quote:
-        image = _highlight(image, _quote_boxes(pdf_path, page_number, quote), dpi)
+        boxes = _quote_boxes(pdf_path, page_number, quote)
+        if boxes:
+            image = _highlight(image, boxes, dpi)
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", optimize=True)

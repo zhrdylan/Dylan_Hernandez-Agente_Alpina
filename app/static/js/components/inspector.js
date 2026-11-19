@@ -68,8 +68,11 @@ export function openCitationDrawer(citation) {
       console.warn("No se pudo cargar la vista previa para:", docId);
     };
 
-    const quoteParam = quote ? `?quote=${encodeURIComponent(quote)}` : "";
-    imgEl.src = `/api/documents/${encodeURIComponent(docId)}/pages/${page}${quoteParam}`;
+    const params = new URLSearchParams();
+    if (version && version !== "vigente") params.set("version", version);
+    if (quote) params.set("quote", quote);
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    imgEl.src = `/api/documents/${encodeURIComponent(docId)}/pages/${page}${qs}`;
   }
 
   drawer.classList.add("open");

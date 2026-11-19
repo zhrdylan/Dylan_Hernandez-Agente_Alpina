@@ -284,21 +284,12 @@ def validate_citations(
             res_doc_id = str(_value(result, "document_id", "")).upper()
             res_title = str(_value(result, "document_title", ""))
 
-            # Coincidencia flexible de ID o título de documento
-            id_match = (
-                document_id
-                and (
-                    res_doc_id == document_id
-                    or document_id in res_doc_id
-                    or res_doc_id in document_id
-                )
-            )
-            title_match = (
+            # Coincidencia exacta de ID o título de documento
+            id_match = bool(document_id and res_doc_id == document_id)
+            title_match = bool(
                 citation_title
-                and (
-                    _normalize(citation_title) in _normalize(res_title)
-                    or _normalize(res_title) in _normalize(citation_title)
-                )
+                and not document_id
+                and _normalize(citation_title) == _normalize(res_title)
             )
 
             if id_match or title_match:
@@ -311,31 +302,11 @@ def validate_citations(
             )
             continue
 
-        # Seleccionar el mejor resultado dentro del rango de páginas, o el primero disponible
-        matched_result = None
-        for candidate in matches:
-            try:
-                page_start = int(_value(candidate, "page_start", 0))
-                page_end = int(_value(candidate, "page_end", page_start))
-            except (TypeError, ValueError):
-                continue
-            if page_start <= page <= page_end:
-                matched_result = candidate
-                break
-
-        if matched_result is None:
-            matched_result = matches[0]
-            try:
-                page = int(_value(matched_result, "page_start", 1))
-            except (TypeError, ValueError):
-                page = 1
-
-        result = matched_result
-        result_version = str(_value(result, "version", ""))
-        citation_version = result_version or str(citation.get("version") or "")
-
         quote = str(citation.get("quote") or "").strip()
+        matched_result = None
+
         if quote:
+            # Si se proporciona cita textual, DEBE coincidir con el contenido de algún fragmento
             matching_result = next(
                 (
                     candidate
@@ -345,24 +316,46 @@ def validate_citations(
                 None,
             )
             if matching_result is not None:
-                result = matching_result
+                matched_result = matching_result
+                try:
+                    page = int(_value(matched_result, "page_start", page))
+                except (TypeError, ValueError):
+                    pass
             else:
-                # Se preserva la cita referencial sin descartar la respuesta del usuario
-                quote = ""
                 issues.append(
-                    f"La cita textual de {document_id or citation_title} página {page} no coincide "
-                    "literalmente; se preserva la referencia documental oficial."
+                    f"La cita textual de {document_id or citation_title} no coincide con el fragmento de la evidencia."
                 )
+                continue
+        else:
+            # Si es cita referencial sin frase, debe existir un fragmento que cubra esa página
+            for candidate in matches:
+                try:
+                    page_start = int(_value(candidate, "page_start", 0))
+                    page_end = int(_value(candidate, "page_end", page_start))
+                except (TypeError, ValueError):
+                    continue
+                if page_start <= page <= page_end:
+                    matched_result = candidate
+                    break
 
-        final_doc_id = str(_value(result, "document_id", document_id)).upper()
+            if matched_result is None:
+                issues.append(
+                    f"La página {page} de {document_id or citation_title} no está entre las fuentes recuperadas."
+                )
+                continue
+
+        result_version = str(_value(matched_result, "version", ""))
+        citation_version = result_version or str(citation.get("version") or "")
+        final_doc_id = str(_value(matched_result, "document_id", document_id)).upper()
+
         valid.append(
             {
                 "document_id": final_doc_id,
-                "title": _value(result, "document_title", citation_title),
+                "title": _value(matched_result, "document_title", citation_title),
                 "page": page,
                 "version": citation_version,
                 "quote": quote,
-                "source_url": _value(result, "source_url"),
+                "source_url": _value(matched_result, "source_url"),
             }
         )
 
@@ -402,32 +395,12 @@ def validate_answer_payload(payload: dict, results: Iterable[Any]) -> dict:
 
     valid_citations, issues = validate_citations(citations, results)
     if not valid_citations:
-        result_list = list(results)
-        if result_list and not abstained and answer:
-            # Auto-asignar la fuente principal recuperada como cita para evitar falsas abstenciones
-            top = result_list[0]
-            try:
-                top_page = int(_value(top, "page_start", 1))
-            except (TypeError, ValueError):
-                top_page = 1
-            valid_citations.append(
-                {
-                    "document_id": str(_value(top, "document_id", "")).upper(),
-                    "title": _value(top, "document_title", ""),
-                    "page": top_page,
-                    "version": str(_value(top, "version", "")),
-                    "quote": "",
-                    "source_url": _value(top, "source_url"),
-                }
-            )
-            issues.append("Se asoció automáticamente la fuente principal recuperada como cita.")
-        else:
-            return {
-                "answer": ABSTENTION,
-                "citations": [],
-                "abstained": True,
-                "issues": [*issues, "La respuesta no tiene citas válidas."],
-            }
+        return {
+            "answer": ABSTENTION,
+            "citations": [],
+            "abstained": True,
+            "issues": [*issues, "La respuesta no tiene citas documentales válidas respaldadas en la evidencia."],
+        }
 
     report_action: dict | None = None
     raw_report = payload.get("generate_report")

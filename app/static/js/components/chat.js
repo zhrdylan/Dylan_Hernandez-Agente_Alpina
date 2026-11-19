@@ -90,6 +90,11 @@ export function createMessageElement(msg) {
     const docIcon = isPdf ? "file-text" : (isDocx ? "file" : "file-spreadsheet");
     const downloadLabel = isPdf ? "PDF" : (isDocx ? "Word" : "Excel");
 
+    const safeDownloadUrl = (report.download_url && String(report.download_url).startsWith("/api/reports/"))
+      ? escapeHtml(report.download_url)
+      : "#";
+    const safeFilename = escapeHtml(report.filename || 'reporte');
+
     const reportCard = document.createElement("div");
     reportCard.className = "report-hero-card";
     reportCard.innerHTML = `
@@ -104,7 +109,7 @@ export function createMessageElement(msg) {
         </span>
       </div>
       <div class="report-hero-title">${escapeHtml(report.title || "Informe Oficial · Alpina")}</div>
-      <div class="report-hero-meta">Archivo: <code>${escapeHtml(report.filename || "informe")}</code> · Verificado con fuentes oficiales</div>
+      <div class="report-hero-meta">Archivo: <code>${safeFilename}</code> · Verificado con fuentes oficiales</div>
       <div class="report-hero-actions">
         ${isPdf ? `
           <button class="report-hero-btn preview" type="button">
@@ -112,7 +117,7 @@ export function createMessageElement(msg) {
             <span>Previsualizar Informe PDF</span>
           </button>
         ` : ''}
-        <a class="report-hero-btn download" href="${report.download_url}" download="${report.filename || 'reporte'}">
+        <a class="report-hero-btn download" href="${safeDownloadUrl}" download="${safeFilename}">
           <i data-lucide="download" class="ui-icon"></i>
           <span>Descargar ${downloadLabel}</span>
         </a>

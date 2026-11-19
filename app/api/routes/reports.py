@@ -3,13 +3,17 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.agent.prompts import ABSTENTION
-from app.api.deps import chat_uuid as validate_chat_uuid, report_uuid as validate_report_uuid
+from app.api.deps import (
+    chat_uuid as validate_chat_uuid,
+    get_current_session_id,
+    report_uuid as validate_report_uuid,
+)
 from app.api.schemas.reports import ReportRequest
 from app.config import REPORTS_DIR
 from app.core.crypto import decrypt_text
@@ -22,15 +26,19 @@ router = APIRouter(tags=["reports"])
 
 
 @router.post("/api/chats/{chat_id}/reports")
-def create_report(chat_id: str, payload: ReportRequest) -> dict:
-    """Genera un informe documental trazable en PDF o XLSX para la última respuesta."""
+def create_report(
+    chat_id: str,
+    payload: ReportRequest,
+    session_id: str = Depends(get_current_session_id),
+) -> dict:
+    """Genera un informe documental trazable en PDF, XLSX o DOCX para la última respuesta."""
     chat_id_clean = validate_chat_uuid(chat_id)
 
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "select id, title from public.chats where id = %s",
-                (chat_id_clean,),
+                "select id, title from public.chats where id = %s and session_id = %s",
+                (chat_id_clean, session_id),
             )
             chat = cur.fetchone()
             if not chat:
@@ -110,6 +118,7 @@ def create_report(chat_id: str, payload: ReportRequest) -> dict:
             verification_status=verification_status,
             abstained=abstained,
             category=str(assistant_metadata.get("category") or "").lower(),
+            session_id=session_id,
         )
     except Exception as exc:
         raise HTTPException(
@@ -119,18 +128,27 @@ def create_report(chat_id: str, payload: ReportRequest) -> dict:
 
 
 @router.get("/api/reports/{report_id}/download")
-def download_report(report_id: str, inline: bool = False) -> Response:
+def download_report(
+    report_id: str,
+    inline: bool = False,
+    session_id: str = Depends(get_current_session_id),
+) -> Response:
     """Descarga o previsualización segura de un informe generado desde Cloudflare R2 o almacenamiento local."""
     report_id_clean = validate_report_uuid(report_id)
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                select report_type, storage_key, metadata, status, title
+                select report_type, storage_key, metadata, status, title, session_id
                 from public.reports
-                where id = %s
+                where id = %s and (
+                    session_id = %s
+                    or (session_id is null and exists (
+                        select 1 from public.chats c where c.id = reports.chat_id and c.session_id = %s
+                    ))
+                )
                 """,
-                (report_id_clean,),
+                (report_id_clean, session_id, session_id),
             )
             report = cur.fetchone()
 

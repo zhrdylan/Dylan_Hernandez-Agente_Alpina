@@ -45,16 +45,20 @@ def list_documents() -> list[dict]:
 
 
 @router.get("/{document_id}/pdf")
-def get_document_pdf(document_id: str) -> FileResponse:
+def get_document_pdf(
+    document_id: str,
+    version: str | None = Query(default=None),
+) -> FileResponse:
     """Descarga o visualización directa del PDF íntegro vía FileResponse."""
     try:
-        pdf_path = resolve_document_pdf(document_id)
+        pdf_path = resolve_document_pdf(document_id, version=version)
     except PagePreviewError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     title = resolve_document_title(document_id)
     safe_title = "".join(c for c in title if c.isalnum() or c in " ._-·()")[:80]
-    filename = f"{document_id}_{safe_title}.pdf" if safe_title else f"{document_id}.pdf"
+    v_suffix = f"_{version}" if version else ""
+    filename = f"{document_id}{v_suffix}_{safe_title}.pdf" if safe_title else f"{document_id}{v_suffix}.pdf"
 
     return FileResponse(
         path=pdf_path,
@@ -67,15 +71,18 @@ def get_document_pdf(document_id: str) -> FileResponse:
 def document_page(
     document_id: str,
     page_number: int,
+    version: str | None = Query(default=None),
     quote: str | None = Query(default=None, max_length=500),
 ) -> Response:
     """Renderiza la imagen PNG de la página solicitada con resaltado de la cita citada."""
     try:
-        image = render_page_png(document_id, page_number, quote=quote)
+        image = render_page_png(document_id, page_number, version=version, quote=quote)
     except PagePreviewError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    cache_header = "private, no-cache" if quote else "public, max-age=86400"
     return Response(
         content=image,
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": cache_header},
     )

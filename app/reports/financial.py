@@ -10,8 +10,8 @@ FINANCIAL_KEYWORDS = {
     "financiera", "financieros", "balance", "ebitda", "utilidad", "utilidades",
     "eeff", "costo", "costos", "p&l", "perdida", "pérdida", "ganancia",
     "ganancias", "activo", "activos", "pasivo", "pasivos", "patrimonio",
-    "ejercicio", "tributar", "impuesto", "impuestos", "renta", "2025", "2024",
-    "margen", "márgenes", "dividendo", "dividendos",
+    "ejercicio", "tributar", "impuesto", "impuestos", "renta",
+    "margen", "márgenes", "dividendo", "dividendos", "estados financieros",
 }
 
 
@@ -120,10 +120,14 @@ def get_financial_sections(query: str, answer_paragraphs: list[str], answer_bull
         ),
         ReportSection(
             heading="Recomendaciones Estratégicas y Próximos Pasos",
-            body=[
-                "Con base en el desempeño reportado (+6,3% en ingresos y margen EBITDA de 15,0%), se recomienda "
-                "priorizar la optimización logística de la cadena de frío, potenciar los formatos de mayor rotación y "
-                "mantener la disciplina de cobertura cambiaria y compras anticipadas de insumos lácteos."
-            ],
+            body=(
+                answer_bullets
+                if answer_bullets
+                else [
+                    "Priorizar la optimización de la cadena de valor y mantener la disciplina de costos e insumos "
+                    "estratégicos conforme a las metas corporativas oficiales."
+                ]
+            ),
+            bullets=answer_bullets if answer_bullets else [],
         ),
     ]

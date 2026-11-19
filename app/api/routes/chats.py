@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+import logging
+from pathlib import Path
 from typing import Any
 import uuid
+
+logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -23,6 +27,7 @@ from app.api.schemas.chats import ChatCreate, MessageCreate
 from app.config import settings
 from app.core.crypto import decrypt_text, encrypt_text
 from app.db.connection import connect
+from app.storage.r2 import R2Storage
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
@@ -51,10 +56,10 @@ def list_chats(session_id: str = Depends(get_current_session_id)) -> list[dict]:
                 """
                 select id::text as id, title, user_id, session_id, created_at, updated_at
                 from public.chats
-                where session_id = %s or user_id = %s
+                where session_id = %s
                 order by updated_at desc
                 """,
-                (session_id, session_id),
+                (session_id,),
             )
             rows = list(cur.fetchall())
             for row in rows:
@@ -69,7 +74,7 @@ def create_chat(
     session_id: str = Depends(get_current_session_id),
 ) -> dict:
     """Crea una nueva conversación vinculada a la sesión actual."""
-    target_user = (payload.user_id if payload and payload.user_id else None) or session_id
+    target_user = session_id
     plain_title = (payload.title if payload and payload.title else "Nuevo chat").strip()
     plain_title = " ".join(plain_title.split())[:120] or "Nuevo chat"
     enc_title = encrypt_text(plain_title)
@@ -100,8 +105,8 @@ def chat_progress(
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "select 1 from public.chats where id = %s and (session_id = %s or user_id = %s)",
-                (chat_id_clean, session_id, session_id),
+                "select 1 from public.chats where id = %s and session_id = %s",
+                (chat_id_clean, session_id),
             )
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Chat no encontrado.")
@@ -118,8 +123,8 @@ def list_messages(
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "select id from public.chats where id = %s and (session_id = %s or user_id = %s)",
-                (chat_id_clean, session_id, session_id),
+                "select id from public.chats where id = %s and session_id = %s",
+                (chat_id_clean, session_id),
             )
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Chat no encontrado.")
@@ -159,8 +164,8 @@ def send_message(
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "select id, title from public.chats where id = %s and (session_id = %s or user_id = %s)",
-                (chat_id_clean, session_id, session_id),
+                "select id, title from public.chats where id = %s and session_id = %s",
+                (chat_id_clean, session_id),
             )
             chat = cur.fetchone()
             if not chat:
@@ -193,9 +198,10 @@ def send_message(
     try:
         result = ask(graph, content, chat_id_clean)
     except Exception as exc:
+        logger.exception("Fallo al procesar el mensaje con el agente para el chat %s", chat_id_clean)
         raise HTTPException(
             status_code=500,
-            detail=f"El agente falló: {type(exc).__name__}: {exc}",
+            detail="Error al procesar la consulta con el agente. Por favor intente nuevamente.",
         ) from exc
 
     citations = result.get("citations") or []
@@ -265,10 +271,8 @@ def send_message(
         "verification_mode": verification_mode,
         "issues": issues,
         "category": category,
-        "search_query": result.get("search_query"),
         "graph_trace": graph_trace,
         "timings": timings,
-        "retrieved_items": retrieval_items,
         "retrieved_count": len(retrieved),
         "retrieved_chunks": retrieved_chunks,
         "document_count": unique_documents,
@@ -324,6 +328,48 @@ def send_message(
     }
 
 
+def _cleanup_reports_and_checkpoints(conn, chat_ids: list[str], session_id: str | None = None) -> None:
+    if not chat_ids and not session_id:
+        return
+    with conn.cursor(row_factory=dict_row) as cur:
+        query = "select id, storage_key, metadata from public.reports where chat_id = any(%s::uuid[])"
+        params: list[Any] = [chat_ids]
+        if session_id:
+            query += " or session_id = %s"
+            params.append(session_id)
+        cur.execute(query, tuple(params))
+        reports = cur.fetchall()
+        for r in reports:
+            meta = r.get("metadata") or {}
+            local_path = Path(str(meta.get("path") or ""))
+            if local_path.is_file():
+                try:
+                    local_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            r2_key = meta.get("r2_key") or r.get("storage_key")
+            if r2_key and R2Storage.is_configured():
+                try:
+                    R2Storage().delete(str(r2_key))
+                except Exception:
+                    pass
+
+        del_rep_query = "delete from public.reports where chat_id = any(%s::uuid[])"
+        del_rep_params: list[Any] = [chat_ids]
+        if session_id:
+            del_rep_query += " or session_id = %s"
+            del_rep_params.append(session_id)
+        cur.execute(del_rep_query, tuple(del_rep_params))
+
+        for cid in chat_ids:
+            try:
+                cur.execute("delete from langgraph.checkpoint_writes where thread_id = %s", (cid,))
+                cur.execute("delete from langgraph.checkpoint_blobs where thread_id = %s", (cid,))
+                cur.execute("delete from langgraph.checkpoints where thread_id = %s", (cid,))
+            except Exception:
+                pass
+
+
 @router.delete("", status_code=204)
 def delete_all_chats(
     request: Request,
@@ -333,11 +379,12 @@ def delete_all_chats(
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "select id::text as id from public.chats where session_id = %s or user_id = %s",
-                (session_id, session_id),
+                "select id::text as id from public.chats where session_id = %s",
+                (session_id,),
             )
             chat_ids = [row["id"] for row in cur.fetchall()]
             if chat_ids:
+                _cleanup_reports_and_checkpoints(conn, chat_ids, session_id=session_id)
                 cur.execute(
                     "delete from public.messages where chat_id = any(%s::uuid[])",
                     (chat_ids,),
@@ -368,21 +415,22 @@ def delete_chat(
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                delete from public.messages 
-                where chat_id = %s and exists (
-                    select 1 from public.chats 
-                    where id = %s and (session_id = %s or user_id = %s)
-                )
-                """,
-                (chat_id_clean, chat_id_clean, session_id, session_id),
+                "select id from public.chats where id = %s and session_id = %s",
+                (chat_id_clean, session_id),
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Chat no encontrado.")
+
+            _cleanup_reports_and_checkpoints(conn, [chat_id_clean])
+
+            cur.execute(
+                "delete from public.messages where chat_id = %s",
+                (chat_id_clean,),
             )
             cur.execute(
-                "delete from public.chats where id = %s and (session_id = %s or user_id = %s)",
-                (chat_id_clean, session_id, session_id),
+                "delete from public.chats where id = %s and session_id = %s",
+                (chat_id_clean, session_id),
             )
-            if cur.rowcount == 0:
-                raise HTTPException(status_code=404, detail="Chat no encontrado.")
 
     checkpointer = get_checkpointer(request)
     if checkpointer is not None and hasattr(checkpointer, "delete_thread"):

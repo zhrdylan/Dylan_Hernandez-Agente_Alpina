@@ -36,6 +36,48 @@ def _thin_border() -> Border:
     return Border(left=side, right=side, top=side, bottom=side)
 
 
+def _parse_numeric(val: Any) -> tuple[Any, str | None]:
+    """Detecta y convierte cadenas con números, porcentajes o moneda a valores numéricos nativos de Excel."""
+    from decimal import Decimal
+
+    if isinstance(val, (int, float, Decimal)):
+        return val, None
+    if not isinstance(val, str):
+        return val, None
+    s = val.strip()
+    if not s:
+        return s, None
+
+    # Porcentajes: e.g. "+6,3%", "-1.5%", "15.0%"
+    if s.endswith("%"):
+        clean_p = s[:-1].replace("+", "").replace(",", ".").strip()
+        try:
+            return float(clean_p) / 100.0, "0.0%"
+        except ValueError:
+            pass
+
+    # Moneda: e.g. "$ 2.458.120.350"
+    if s.startswith("$"):
+        rem = s.replace("$", "").strip()
+        if not any(c.isalpha() for c in rem):
+            clean_c = rem.replace(".", "").replace(",", ".").strip()
+            try:
+                return float(clean_c), "$ #,##0"
+            except ValueError:
+                pass
+
+    # Números enteros o flotantes puros
+    if re.match(r"^-?\d+(\.\d+)?$", s):
+        try:
+            if "." in s:
+                return float(s), None
+            return int(s), None
+        except ValueError:
+            pass
+
+    return val, None
+
+
 def _strip_markdown(text: str) -> str:
     """Elimina marcas de Markdown (asteriscos, guiones bajos, almohadillas) para dejar texto limpio en celdas Excel."""
     if not text:
@@ -479,7 +521,10 @@ def _write_table(
     for values in table.rows:
         padded = list(values) + [""] * max(0, column_count - len(values))
         for column, value in enumerate(padded[:column_count], start=1):
-            cell = ws.cell(row=row, column=column, value=str(value))
+            parsed_val, num_fmt = _parse_numeric(value)
+            cell = ws.cell(row=row, column=column, value=parsed_val)
+            if num_fmt:
+                cell.number_format = num_fmt
             cell.font = Font(name=FONT, size=8.5, color=INK)
             cell.border = _thin_border()
             cell.alignment = Alignment(vertical="top", wrap_text=True)

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import logging
 import re
 import time
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -85,18 +88,30 @@ def _last_user_query(messages: list[Any]) -> str:
 
 
 def _default_retrieve(query: str, filters: SearchFilters) -> list[dict]:
+    results = []
+    products = []
     with connect() as conn:
-        results = coverage_search(
-            conn,
-            query,
-            filters=filters,
-            base_limit=8,
-            extra_documents=6,
-            max_documents=10,
-        )
-        products = []
+        # 1. Búsqueda de productos independiente de embeddings (F12)
         if not filters.categories or "nutrition" in filters.categories:
-            products = search_products(conn, query, limit=3)
+            try:
+                products = search_products(conn, query, limit=3)
+            except Exception as exc:
+                logger.warning("Fallo en búsqueda de productos: %s", exc)
+                products = []
+
+        # 2. Búsqueda vectorial/cobertura aislada ante fallos de embeddings/Cohere (F11, F12)
+        try:
+            results = coverage_search(
+                conn,
+                query,
+                filters=filters,
+                base_limit=8,
+                extra_documents=6,
+                max_documents=10,
+            )
+        except Exception as exc:
+            logger.warning("Fallo en búsqueda vectorial/cobertura: %s", exc)
+            results = []
 
     payload = [dataclasses.asdict(product) for product in products]
     payload.extend(dataclasses.asdict(result) for result in results)
@@ -164,7 +179,7 @@ def supervisor_node(state: AgentState) -> dict:
             "citations": [],
             "answer": guardrail_answer,
             "abstained": False,
-            "verified": True,
+            "verified": False,
             "issues": ["Consulta mitigada por guardrail de seguridad (fuera de dominio o jailbreak)."],
             "timings": _timing(state, "supervisor", started),
         }
@@ -309,10 +324,10 @@ def retrieve_node(state: AgentState, retrieve_fn: RetrieveFn) -> dict:
     try:
         filters = SearchFilters(**(state.get("filters") or {}))
         results = retrieve_fn(query, filters)
-        if not results and (filters.categories or filters.document_ids):
+        if not results and filters.categories:
             broad_filters = SearchFilters(
                 categories=None,
-                document_ids=None,
+                document_ids=filters.document_ids,
                 doc_type=filters.doc_type,
                 country=filters.country,
                 vigente=filters.vigente,
@@ -360,18 +375,20 @@ def answer_node(state: AgentState) -> dict:
             "answer": guard_ans,
             "citations": [],
             "abstained": False,
-            "verified": True,
+            "verified": False,
             "messages": [AIMessage(content=guard_ans)],
             "timings": _timing(state, "answer", started),
         }
 
-    if not state.get("needs_documents", True) or state.get("category") == "general":
+    # Solo rama conversacional si es netamente saludo y no requiere documentos
+    is_greeting = classify_conversational_intent(query) is not None
+    if is_greeting and not state.get("needs_documents", True):
         conversational_answer = generate_conversational_response(query, history)
         return {
             "answer": conversational_answer,
             "citations": [],
             "abstained": False,
-            "verified": True,
+            "verified": False,
             "timings": _timing(state, "answer", started),
         }
 
@@ -400,7 +417,7 @@ def answer_node(state: AgentState) -> dict:
             max_tokens=1000,
             fallback_model=settings.groq_model_fallback,
         )
-        validated = validate_answer_payload(payload, results)
+        validated = validate_answer_payload(payload, answer_results)
     except Exception as first_exc:
         try:
             payload = chat_json(
@@ -416,7 +433,7 @@ def answer_node(state: AgentState) -> dict:
                 max_tokens=800,
                 fallback_model=settings.groq_model_fallback,
             )
-            validated = validate_answer_payload(payload, results)
+            validated = validate_answer_payload(payload, answer_results[:3])
         except Exception as exc:
             return {
                 "answer": prompts.ABSTENTION,
@@ -430,15 +447,17 @@ def answer_node(state: AgentState) -> dict:
                 "timings": _timing(state, "answer", started),
             }
 
-    # Solo invocar tool si el usuario lo solicitó explícitamente en formato PDF o Excel
+    # Invocar generación de reporte si el usuario lo solicitó explícitamente en formato PDF, Excel o Word
     explicit_req = detect_report_request(query)
     generated_report = None
     if explicit_req and not validated["abstained"]:
+        # Respetar prioritariamente el formato explícito pedido por el usuario (docx, xlsx o pdf)
         report_type = explicit_req.get("report_type", "pdf")
-        if validated.get("generate_report") and isinstance(validated["generate_report"], dict):
-            llm_type = validated["generate_report"].get("report_type")
-            if llm_type in {"pdf", "xlsx"}:
+        if not explicit_req.get("report_type") and validated.get("generate_report") and isinstance(validated["generate_report"], dict):
+            llm_type = str(validated["generate_report"].get("report_type") or "").lower().strip()
+            if llm_type in {"pdf", "xlsx", "docx"}:
                 report_type = llm_type
+
         try:
             generated_report = create_report_record(
                 chat_id=state.get("chat_id") or "",
@@ -446,9 +465,10 @@ def answer_node(state: AgentState) -> dict:
                 answer=validated["answer"],
                 citations=validated["citations"],
                 report_type=report_type,
-                verification_status="Citas OK",
+                verification_status="Verificado",
                 abstained=False,
                 category=state.get("category") or "",
+                session_id=state.get("session_id"),
             )
         except Exception as exc:
             issues.append(f"Tool generate_report falló: {type(exc).__name__}: {exc}")
@@ -477,9 +497,9 @@ def verify_node(state: AgentState) -> dict:
             "answer": guard_ans,
             "citations": [],
             "abstained": False,
-            "verified": True,
+            "verified": False,
             "messages": [AIMessage(content=guard_ans)],
-            "timings": _timing(state, "answer", started),
+            "timings": _timing(state, "verify", started),
         }
 
     if not state.get("needs_documents", True) or state.get("category") == "general":
@@ -487,7 +507,7 @@ def verify_node(state: AgentState) -> dict:
             "answer": answer,
             "citations": [],
             "abstained": False,
-            "verified": True,
+            "verified": False,
             "issues": issues,
             "generated_report": state.get("generated_report"),
             "messages": [AIMessage(content=answer)],
@@ -500,7 +520,7 @@ def verify_node(state: AgentState) -> dict:
             "answer": final,
             "citations": [],
             "abstained": True,
-            "verified": True,
+            "verified": False,
             "generated_report": None,
             "messages": [AIMessage(content=final)],
             "timings": _timing(state, "verify", started),

@@ -97,11 +97,16 @@ create index if not exists chunk_embeddings_chunk_id_idx
 
 create table if not exists public.chats (
     id uuid primary key default gen_random_uuid(),
+    session_id text,
+    user_id text,
     title text,
     metadata jsonb not null default '{}'::jsonb,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
+
+create index if not exists chats_session_id_idx on public.chats (session_id);
+create index if not exists chats_user_id_idx on public.chats (user_id);
 
 create table if not exists public.messages (
     id uuid primary key default gen_random_uuid(),
@@ -140,7 +145,8 @@ create index if not exists ingestion_runs_document_id_idx
 create table if not exists public.reports (
     id uuid primary key default gen_random_uuid(),
     chat_id uuid references public.chats(id) on delete set null,
-    report_type text not null check (report_type in ('pdf', 'xlsx')),
+    session_id text,
+    report_type text not null check (report_type in ('pdf', 'xlsx', 'docx')),
     title text not null,
     status text not null default 'pending'
         check (status in ('pending', 'approved', 'generated', 'failed')),
@@ -153,6 +159,7 @@ create table if not exists public.reports (
 );
 
 create index if not exists reports_chat_id_idx on public.reports (chat_id);
+create index if not exists reports_session_id_idx on public.reports (session_id);
 
 create table if not exists public.audit_events (
     id bigserial primary key,

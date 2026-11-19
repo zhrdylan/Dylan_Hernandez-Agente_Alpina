@@ -34,7 +34,7 @@ export async function loadAndRenderCatalog(onSelectProduct) {
       };
     }
   } catch (err) {
-    container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--red);"><i data-lucide="alert-circle" class="ui-icon"></i> Error al cargar productos: ${err.message}</div>`;
+    container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--red);"><i data-lucide="alert-circle" class="ui-icon"></i> Error al cargar productos: ${escapeHtml(err.message || String(err))}</div>`;
     refreshIcons(container);
   }
 }

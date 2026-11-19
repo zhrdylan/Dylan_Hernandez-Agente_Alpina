@@ -107,12 +107,12 @@ def extract_document(
         "empty_pages": sum(1 for page in pages if not page.text.strip()),
         "total_chars": sum(len(page.text) for page in pages),
     }
-    fatal_errors = [error for error in errors if error.get("kind") != "empty"]
-    status = (
-        "complete"
-        if not fatal_errors and stats["ocr_skipped"] == 0
-        else "partial"
-    )
+    if stats["total_chars"] == 0 or (pages and stats["empty_pages"] == len(pages)):
+        status = "failed"
+    elif errors or stats["ocr_skipped"] > 0 or stats["ocr_failed"] > 0:
+        status = "partial"
+    else:
+        status = "complete"
 
     return {
         "id": doc["id"],

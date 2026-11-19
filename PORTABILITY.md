@@ -80,6 +80,9 @@ pip install -r requirements.txt
 # (El paquete ya incluye .env configurado; si no existiera:)
 cp .env.example .env
 
+# 5b. Verificar y aplicar migraciones de esquema
+python -m app.db.migrate
+
 # 6. Iniciar el servidor FastAPI con Uvicorn
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```

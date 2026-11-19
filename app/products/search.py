@@ -34,10 +34,20 @@ def product_row_to_result(row: dict) -> SearchResult:
     claims_text = (
         "; ".join(str(claim) for claim in claims)
         if claims
-        else "No consta en la fuente oficial."
+        else "No consta en la fuente oficial (sin sellos o declaraciones adicionales)."
     )
-    ingredients = str(row.get("ingredients") or "No consta en la fuente oficial.")
-    allergens = str(row.get("allergens") or "No consta en la fuente oficial.")
+    ingredients_raw = row.get("ingredients")
+    ingredients = (
+        str(ingredients_raw).strip()
+        if ingredients_raw
+        else "No consta en la fuente oficial (no declarado)."
+    )
+    allergens_raw = row.get("allergens")
+    allergens = (
+        str(allergens_raw).strip()
+        if allergens_raw
+        else "No consta en la fuente oficial (no declarado)."
+    )
     availability = str(row.get("availability") or "No consta")
 
     source_page = int(row.get("source_page") or 1)
@@ -147,6 +157,51 @@ def search_products(
     *,
     limit: int = 3,
 ) -> list[SearchResult]:
+    raw_query = (query or "").strip()
+    if not raw_query:
+        return []
+
+    # Prioridad 1: Búsqueda exacta por SKU o EAN sin distorsión de normalización (F12)
+    tokens = raw_query.split()
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            select
+                id, ean, name, brand, presentation, price, currency,
+                protein_g, claims, ingredients, allergens, availability,
+                source_url, source_page, verified_at, metadata,
+                1.0 as score
+            from public.products
+            where upper(id) = upper(%s) or ean = %s
+            limit %s
+            """,
+            (raw_query, raw_query, limit),
+        )
+        exact_rows = list(cur.fetchall())
+        if not exact_rows and len(tokens) > 1:
+            for token in tokens:
+                clean_tok = token.strip(",.;:()[]{}")
+                if len(clean_tok) >= 3:
+                    cur.execute(
+                        """
+                        select
+                            id, ean, name, brand, presentation, price, currency,
+                            protein_g, claims, ingredients, allergens, availability,
+                            source_url, source_page, verified_at, metadata,
+                            1.0 as score
+                        from public.products
+                        where upper(id) = upper(%s) or ean = %s
+                        limit %s
+                        """,
+                        (clean_tok, clean_tok, limit),
+                    )
+                    exact_rows = list(cur.fetchall())
+                    if exact_rows:
+                        break
+
+    if exact_rows:
+        return [product_row_to_result(row) for row in exact_rows]
+
     cleaned = clean_search_query(query)
     if not cleaned:
         return []

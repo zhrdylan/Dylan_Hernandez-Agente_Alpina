@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Callable
+import uuid
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -18,9 +19,50 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class AnonymousSessionMiddleware(BaseHTTPMiddleware):
+    """Garantiza que toda solicitud HTTP tenga una sesión anónima aislada y segura en cookie HttpOnly."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        cookie_session = request.cookies.get("alpina_session_id")
+        header_session = request.headers.get("x-session-id")
+        raw_session = header_session or cookie_session
+        is_new = False
+
+        clean = ""
+        if raw_session and raw_session.strip().lower() not in {"default", "null", "undefined"}:
+            sanitized = "".join(c for c in raw_session.strip() if c.isalnum() or c in "-_.")[:64]
+            if len(sanitized) >= 8:
+                clean = sanitized
+
+        if not clean:
+            clean = f"sess-{uuid.uuid4().hex}"
+            is_new = True
+
+        request.state.session_id = clean
+
+        response = await call_next(request)
+
+        # Establecer cookie segura HttpOnly si es nueva sesión o si no tenía la cookie configurada
+        if is_new or not cookie_session:
+            secure = request.url.scheme == "https"
+            response.set_cookie(
+                key="alpina_session_id",
+                value=clean,
+                httponly=True,
+                samesite="lax",
+                secure=secure,
+                max_age=86400 * 30,  # 30 días
+                path="/",
+            )
+            response.headers["X-Session-Id"] = clean
+
+        return response
+
+
 def setup_security_middlewares(app: FastAPI, *, allow_all_origins: bool = True) -> None:
-    """Configura cabeceras seguras y CORS para la aplicación."""
+    """Configura cabeceras seguras, aislamiento de sesión anónima y CORS para la aplicación."""
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(AnonymousSessionMiddleware)
 
     origins = ["*"] if allow_all_origins else [
         "http://localhost:3000",
@@ -34,5 +76,5 @@ def setup_security_middlewares(app: FastAPI, *, allow_all_origins: bool = True) 
         allow_credentials=True if not allow_all_origins else False,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS", "HEAD"],
         allow_headers=["*"],
-        expose_headers=["Content-Disposition"],
+        expose_headers=["Content-Disposition", "X-Session-Id"],
     )

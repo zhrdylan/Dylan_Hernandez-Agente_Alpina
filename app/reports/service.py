@@ -24,6 +24,7 @@ def create_report_record(
     verification_status: str = "Verificado",
     abstained: bool = False,
     category: str = "",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """Crea y registra formalmente un reporte (PDF, XLSX o DOCX) para una consulta y respuesta dadas."""
     report_type_clean = str(report_type or "pdf").lower().strip()
@@ -109,11 +110,11 @@ def create_report_record(
 
     if is_financial:
         report_title = "Informe de Resultados Financieros 2025 · Alpina"
-        report_subtitle = f"Estados Financieros Oficiales (P&L, EBITDA, Balance): {q_clean[:80]}"
+        report_subtitle = "Estados Financieros Consolidados y Separados Auditados · Alpina S.A.S. BIC"
         sections = get_financial_sections(q_clean, answer_paragraphs, answer_bullets)
     elif any(k in q_lower for k in ("ley", "resoluci", "norma", "sello", "etiquetad", "rotulad", "invima", "calidad", "inocuidad")):
         report_title = "Informe de Normativa y Etiquetado · Alpina"
-        report_subtitle = f"Marco regulatorio oficial: {q_clean[:80]}"
+        report_subtitle = "Marco Regulatorio y Requisitos Sanitarios Oficiales en Colombia"
         analysis_heading = "Disposiciones Normativas y Requisitos Sanitarios"
         sections = [
             ReportSection(
@@ -124,7 +125,7 @@ def create_report_record(
         ]
     elif product_rows or category == "product" or any(k in q_lower for k in ("yogurt", "queso", "leche", "finesse", "griego", "producto", "precio", "ean", "proteina", "proteína")):
         report_title = "Informe de Portafolio y Productos · Alpina"
-        report_subtitle = f"Catálogo oficial de productos: {q_clean[:80]}"
+        report_subtitle = "Ficha Técnica y Portafolio Oficial de Productos · Alpina"
         analysis_heading = "Ficha Oficial de Productos y Claims Nutricionales"
         sections = [
             ReportSection(
@@ -136,7 +137,7 @@ def create_report_record(
     else:
         topic_suffix = f" · {clean_topic[:35].capitalize()}" if len(clean_topic) > 3 else ""
         report_title = f"Informe Documental Ejecutivo{topic_suffix}"
-        report_subtitle = f"Respuesta trazable oficial: {q_clean[:80]}"
+        report_subtitle = "Análisis Estratégico y Trazabilidad Documental Oficial"
         analysis_heading = "Síntesis y Hallazgos Documentales Oficiales"
         sections = [
             ReportSection(
@@ -190,26 +191,31 @@ def create_report_record(
     with connect() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             clean_chat_id = None
+            resolved_session_id = session_id
             if chat_id:
                 try:
                     uuid.UUID(str(chat_id))
-                    cur.execute("select id from public.chats where id = %s", (str(chat_id),))
-                    if cur.fetchone():
+                    cur.execute("select id, session_id from public.chats where id = %s", (str(chat_id),))
+                    chat_row = cur.fetchone()
+                    if chat_row:
                         clean_chat_id = str(chat_id)
+                        if not resolved_session_id and chat_row.get("session_id"):
+                            resolved_session_id = str(chat_row["session_id"])
                 except Exception:
                     clean_chat_id = None
 
             cur.execute(
                 """
                 insert into public.reports
-                    (id, chat_id, report_type, title, status, spec,
+                    (id, chat_id, session_id, report_type, title, status, spec,
                      storage_key, metadata)
-                values (%s, %s, %s, %s, 'generated', %s, %s, %s)
+                values (%s, %s, %s, %s, %s, 'generated', %s, %s, %s)
                 returning id::text as id, created_at
                 """,
                 (
                     artifact.report_id,
                     clean_chat_id,
+                    resolved_session_id,
                     artifact.report_type,
                     spec.title,
                     Jsonb(spec.model_dump(mode="json")),
