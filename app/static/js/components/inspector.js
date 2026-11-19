@@ -34,8 +34,8 @@ export function openCitationDrawer(citation) {
     if (metaEl) metaEl.textContent = `Catálogo Maestro Oficial · SKU: ${docId.toUpperCase()}`;
     if (hintEl) hintEl.textContent = "Ficha técnica oficial generada y verificada contra el catálogo de productos de Alpina.";
   } else {
-    if (metaEl) metaEl.textContent = `Documento ${docId} · Pág. ${page} · Versión ${version}`;
-    if (hintEl) hintEl.textContent = "El recuadro amarillo resalta la coincidencia exacta de la cita en el PDF oficial original.";
+    if (metaEl) metaEl.textContent = `Documento oficial · Pág. ${page} · Versión ${version}`;
+    if (hintEl) hintEl.textContent = "El resaltado tenue y contorneado delimita la coincidencia textual exacta en el documento oficial.";
   }
 
   if (quoteEl) quoteEl.textContent = quote ? `"${quote}"` : "Cita oficial referenciada en este fragmento.";

@@ -189,9 +189,26 @@
             <h3 class="preview-info-title">Trazabilidad de Cita</h3>
             <div id="preview-quote" class="preview-quote-box"></div>
             <p style="font-size: 0.75rem; color: var(--muted); margin: 0;">
-              El resaltado en amarillo corresponde a la coincidencia textual encontrada en la página oficial.
+              El resaltado tenue y contorneado corresponde a la coincidencia textual auditada en el documento oficial.
             </p>
           </div>
+        </div>
+        <div class="preview-toolbar">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <button id="preview-prev-btn" class="ghost-button" type="button" aria-label="Página anterior">
+              <i data-lucide="chevron-left" class="ui-icon"></i>
+              <span>Anterior</span>
+            </button>
+            <span id="preview-page-indicator" class="preview-page-indicator">Página 1</span>
+            <button id="preview-next-btn" class="ghost-button" type="button" aria-label="Página siguiente">
+              <span>Siguiente</span>
+              <i data-lucide="chevron-right" class="ui-icon"></i>
+            </button>
+          </div>
+          <a id="preview-full-pdf-btn" class="ghost-button" href="#" target="_blank" rel="noopener noreferrer">
+            <i data-lucide="file-down" class="ui-icon"></i>
+            <span>Ver PDF Completo</span>
+          </a>
         </div>
       </section>
     </div>

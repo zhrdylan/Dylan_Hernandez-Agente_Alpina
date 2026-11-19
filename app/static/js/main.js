@@ -3,7 +3,7 @@ import { state, setState } from "./state.js";
 import { storage } from "./storage.js";
 import { renderMessages, showTypingIndicator, hideTypingIndicator } from "./components/chat.js";
 import { loadAndRenderCatalog } from "./components/catalog.js";
-import { loadAndRenderDocuments, openPagePreview } from "./components/documents.js";
+import { loadAndRenderDocuments, openPagePreview, setupPreviewControls } from "./components/documents.js";
 import { openPdfPreviewModal, closeDossierModal } from "./components/dossier.js";
 import { initCitationDrawer } from "./components/inspector.js";
 import { refreshIcons } from "./utils/icons.js";
@@ -13,10 +13,12 @@ import { refreshIcons } from "./utils/icons.js";
  */
 document.addEventListener("DOMContentLoaded", async () => {
   storage.cookies.getDeviceId();
+  storage.cookies.getSessionId();
   initModals();
   initComposer();
   initSidebar();
   initCitationDrawer();
+  setupPreviewControls();
 
   refreshIcons();
 

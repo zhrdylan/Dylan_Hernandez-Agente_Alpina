@@ -62,17 +62,59 @@ def _r2_pdf_path(document_id: str) -> Path | None:
         return None
 
 
+OFFICIAL_DOCUMENT_TITLES = {
+    "C1": "Informe de Gestión 2026 · Alpina",
+    "C2": "Informe de Sostenibilidad 2025 · Alpina",
+    "C3": "Informe Alpina BIC 2025",
+    "C4": "Estados Financieros Separados 2025 · Alpina S.A.S. BIC",
+    "C5": "Estados Financieros Consolidados 2025 · Alpina",
+    "N1": "Ley 2120 de 2021 (Ley de Comida Chatarra)",
+    "N2": "Resolución 810 de 2021 (Etiquetado Nutricional y Frontal)",
+    "N3": "Resolución 2492 de 2022 (Sellos Frontales de Advertencia)",
+    "N4": "Resolución 2025013945 de 2025",
+    "N5": "Resolución 5109 de 2005",
+    "N6": "Resolución 333 de 2011",
+    "N7": "Resolución 2674 de 2013",
+    "N8": "Normograma de aditivos alimentarios",
+    "N9": "ABECE: aplicación Resolución 2492 de 2022 y Resolución 810 de 2021",
+    "N10": "Consolidado normativo 2026",
+    "N11": "Política de Calidad de Alpina",
+    "P1": "Portafolio de Claims Nutricionales 2024",
+    "P2": "Finesse y Yox con Defensis",
+    "P3": "Alpi10",
+    "P4": "Alpina Baby Gu",
+}
+
+
+def resolve_document_title(document_id: str) -> str:
+    """Obtiene el nombre oficial completo y legible del documento corporativo o normativo."""
+    normalized = str(document_id or "").strip().upper()
+    if normalized in OFFICIAL_DOCUMENT_TITLES:
+        return OFFICIAL_DOCUMENT_TITLES[normalized]
+    lock_entry = _load_lock().get(normalized)
+    if lock_entry and lock_entry.get("title"):
+        return str(lock_entry["title"])
+    return normalized
+
+
 def resolve_document_pdf(document_id: str) -> Path:
     normalized = str(document_id or "").strip().upper()
     if not re.fullmatch(r"[NPC]\d{1,2}", normalized):
         raise PagePreviewError("Documento no válido para vista previa.")
 
+    # 1. Comprobar caché local de documentos
+    cached = DOCUMENT_CACHE_DIR / f"{normalized}.pdf"
+    if cached.is_file():
+        return cached
+
+    # 2. Comprobar lockfile
     lock_entry = _load_lock().get(normalized)
     if lock_entry and lock_entry.get("status") == "ok":
         local_path = BASE_DIR / str(lock_entry.get("local_path") or "")
         if local_path.is_file():
             return local_path
 
+    # 3. Comprobar R2
     r2_path = _r2_pdf_path(normalized)
     if r2_path and r2_path.is_file():
         return r2_path
@@ -81,7 +123,7 @@ def resolve_document_pdf(document_id: str) -> Path:
 
 
 def _clean_tokens(text: str) -> list[str]:
-    raw_tokens = [t.strip(" .,;:\"'()[]{}«»“”’‘¿?¡!-–—") for t in (text or "").split()]
+    raw_tokens = [t.strip(" .,;:\"'()[]{}«»“”’‘¿?¡!-–—\r\n\t") for t in (text or "").split()]
     return [t for t in raw_tokens if t]
 
 
@@ -156,14 +198,15 @@ def _highlight(image: Image.Image, boxes: list[dict], dpi: int) -> Image.Image:
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     for box in boxes:
-        left = max(0, float(box.get("x0", 0)) * scale - 2)
-        top = max(0, float(box.get("top", 0)) * scale - 2)
-        right = float(box.get("x1", 0)) * scale + 2
-        bottom = float(box.get("bottom", 0)) * scale + 2
+        left = max(0, float(box.get("x0", 0)) * scale - 1.5)
+        top = max(0, float(box.get("top", 0)) * scale - 1.5)
+        right = float(box.get("x1", 0)) * scale + 1.5
+        bottom = float(box.get("bottom", 0)) * scale + 1.5
+        # Resaltador sutil corporativo: azul/ámbar suave con 25% opacidad y borde fino
         draw.rectangle(
             [left, top, right, bottom],
-            fill=(255, 214, 10, 105),
-            outline=(245, 158, 11, 220),
+            fill=(3, 105, 161, 64),      # Azul institucional tenue con opacidad 25% (64/255)
+            outline=(2, 132, 199, 200),  # Borde sutil limpio y preciso
             width=2,
         )
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
@@ -364,3 +407,17 @@ def render_page_png(
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(payload)
     return payload
+
+
+def get_document_page_count(document_id: str) -> int:
+    """Devuelve el número total de páginas del documento."""
+    normalized = str(document_id or "").strip().upper()
+    try:
+        pdf_path = resolve_document_pdf(normalized)
+        doc = pdfium.PdfDocument(str(pdf_path))
+        try:
+            return len(doc)
+        finally:
+            doc.close()
+    except Exception:
+        return 1

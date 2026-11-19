@@ -65,15 +65,64 @@ function renderDocumentItems(documents, container) {
   refreshIcons(container);
 }
 
+let currentDocId = null;
+let currentPage = 1;
+let currentTotalPages = 1;
+let currentQuote = null;
+
+export function setupPreviewControls() {
+  const prevBtn = document.getElementById("preview-prev-btn");
+  const nextBtn = document.getElementById("preview-next-btn");
+
+  if (prevBtn) {
+    prevBtn.onclick = () => {
+      if (currentPage > 1) {
+        openPagePreview(currentDocId, currentPage - 1, currentQuote);
+      }
+    };
+  }
+  if (nextBtn) {
+    nextBtn.onclick = () => {
+      if (currentPage < currentTotalPages) {
+        openPagePreview(currentDocId, currentPage + 1, currentQuote);
+      }
+    };
+  }
+}
+
 export function openPagePreview(docId, pageNumber, quote = null) {
   const modal = document.getElementById("preview-modal");
   const imgEl = document.getElementById("preview-img");
   const titleEl = document.getElementById("preview-title");
   const quoteEl = document.getElementById("preview-quote");
+  const prevBtn = document.getElementById("preview-prev-btn");
+  const nextBtn = document.getElementById("preview-next-btn");
+  const indicator = document.getElementById("preview-page-indicator");
+  const fullPdfBtn = document.getElementById("preview-full-pdf-btn");
 
   if (!modal || !imgEl) return;
 
-  if (titleEl) titleEl.textContent = `Documento ${docId} · Página ${pageNumber}`;
+  currentDocId = docId;
+  currentPage = pageNumber;
+  currentQuote = quote;
+
+  // Resolver metadatos del documento desde el caché
+  const docInfo = (state.documentsCache || []).find(d => d.id === docId);
+  currentTotalPages = (docInfo && docInfo.page_count && docInfo.page_count > 0)
+    ? docInfo.page_count
+    : Math.max(pageNumber, 1);
+  const docTitle = (docInfo && docInfo.title) ? docInfo.title : `Documento ${docId}`;
+
+  if (titleEl) titleEl.textContent = `${docTitle} · Página ${pageNumber}`;
+  if (indicator) indicator.textContent = `Página ${pageNumber} de ${currentTotalPages}`;
+  if (prevBtn) prevBtn.disabled = currentPage <= 1;
+  if (nextBtn) nextBtn.disabled = currentPage >= currentTotalPages;
+
+  if (fullPdfBtn) {
+    fullPdfBtn.href = `/api/documents/${encodeURIComponent(docId)}/pdf`;
+    fullPdfBtn.style.display = docId.toUpperCase().startsWith("SKU-") ? "none" : "inline-flex";
+  }
+
   if (quoteEl) {
     if (quote) {
       quoteEl.innerHTML = `<strong>Cita citada:</strong><br>"${escapeHtml(quote)}"`;
@@ -88,6 +137,7 @@ export function openPagePreview(docId, pageNumber, quote = null) {
 
   modal.classList.add("open");
   modal.setAttribute("aria-hidden", "false");
+  refreshIcons(modal);
 }
 
 function escapeHtml(text) {
