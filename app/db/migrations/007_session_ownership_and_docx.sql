@@ -14,3 +14,7 @@ create index if not exists reports_session_id_idx on public.reports (session_id)
 alter table public.reports drop constraint if exists reports_report_type_check;
 alter table public.reports add constraint reports_report_type_check
     check (report_type in ('pdf', 'xlsx', 'docx'));
+
+alter table public.reports drop constraint if exists reports_status_check;
+alter table public.reports add constraint reports_status_check
+    check (status in ('pending', 'approved', 'generated', 'failed', 'revoked'));

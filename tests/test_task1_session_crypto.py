@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.core.crypto import encrypt_text, decrypt_text, get_fernet
+from app.api.deps import derive_owner_id
 from app.db.connection import connect
 
 
@@ -48,7 +49,7 @@ def test_session_isolation_and_encryption():
                 cur.execute("SELECT title, session_id FROM public.chats WHERE id = %s", (chat_a_id,))
                 raw_row = cur.fetchone()
                 raw_title, raw_session_id = raw_row[0], raw_row[1]
-                assert raw_session_id == session_a
+                assert raw_session_id == derive_owner_id(session_a)
                 assert raw_title != title_a
                 assert raw_title.startswith("gAAAAA")
                 assert decrypt_text(raw_title) == title_a

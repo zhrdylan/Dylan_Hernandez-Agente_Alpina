@@ -2,8 +2,20 @@
 -- Aplicar con Supabase MCP (apply_migration) o psql.
 -- pgvector se instala en public; el tipo vector queda disponible por search_path.
 
-create extension if not exists vector with schema extensions;
-create extension if not exists pgcrypto with schema extensions;
+do $$ begin
+    create schema if not exists extensions;
+exception when others then null;
+end $$;
+
+do $$ begin
+    create extension if not exists vector with schema extensions;
+exception when others then null;
+end $$;
+
+do $$ begin
+    create extension if not exists pgcrypto with schema extensions;
+exception when others then null;
+end $$;
 
 create or replace function public.set_updated_at()
 returns trigger
@@ -105,6 +117,10 @@ create table if not exists public.chats (
     updated_at timestamptz not null default now()
 );
 
+alter table public.chats
+    add column if not exists session_id text,
+    add column if not exists user_id text;
+
 create index if not exists chats_session_id_idx on public.chats (session_id);
 create index if not exists chats_user_id_idx on public.chats (user_id);
 
@@ -149,7 +165,7 @@ create table if not exists public.reports (
     report_type text not null check (report_type in ('pdf', 'xlsx', 'docx')),
     title text not null,
     status text not null default 'pending'
-        check (status in ('pending', 'approved', 'generated', 'failed')),
+        check (status in ('pending', 'approved', 'generated', 'failed', 'revoked')),
     spec jsonb not null default '{}'::jsonb,
     storage_key text,
     error text,
@@ -157,6 +173,9 @@ create table if not exists public.reports (
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
+
+alter table public.reports
+    add column if not exists session_id text;
 
 create index if not exists reports_chat_id_idx on public.reports (chat_id);
 create index if not exists reports_session_id_idx on public.reports (session_id);

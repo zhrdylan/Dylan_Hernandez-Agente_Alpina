@@ -14,6 +14,7 @@ from app.api.schemas.reports import ReportRequest
 from app.config import BASE_DIR, ensure_project_dirs, settings
 from app.core.security import setup_security_middlewares
 from app.db.connection import close_pool, warm_pool
+from app.db.migrate import check_database_ready
 
 ensure_project_dirs()
 
@@ -26,15 +27,23 @@ async def lifespan(app: FastAPI):
     app.state.pool = None
     app.state.graph = None
     app.state.startup_error = None
+    app.state.ready = False
     pool = None
     try:
-        checkpointer, pool = create_postgres_checkpointer()
-        app.state.checkpointer = checkpointer
-        app.state.pool = pool
-        app.state.graph = build_graph(checkpointer)
-        warm_pool()
+        ready, status = check_database_ready()
+        if not ready:
+            app.state.startup_error = "Database schema not ready or pending migrations."
+            app.state.ready = False
+        else:
+            app.state.ready = True
+            checkpointer, pool = create_postgres_checkpointer()
+            app.state.checkpointer = checkpointer
+            app.state.pool = pool
+            app.state.graph = build_graph(checkpointer)
+            warm_pool()
     except Exception as exc:
         app.state.startup_error = f"{type(exc).__name__}: {exc}"
+        app.state.ready = False
     yield
     if pool is not None:
         pool.close()

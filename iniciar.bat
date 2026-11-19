@@ -199,8 +199,9 @@ echo.
 echo [INFO] Verificando esquema y migraciones de base de datos...
 "%VENV_PY%" -m app.db.migrate
 if %errorlevel% neq 0 (
-    echo [ADVERTENCIA] No se pudo verificar o migrar la base de datos de inmediato.
-    echo               Revisa la conexion DATABASE_URL en tu archivo .env.
+    echo [ERROR CRITICO] Fallaron las migraciones de base de datos.
+    echo                 El servidor no puede iniciar con un esquema inconsistente.
+    exit /b %errorlevel%
 )
 
 :: -------------------------------------------------------------------------

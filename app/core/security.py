@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from typing import Callable
+import secrets
 import uuid
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+
+from app.api.deps import derive_owner_id
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -25,6 +28,8 @@ class AnonymousSessionMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         cookie_session = request.cookies.get("alpina_session_id")
         header_session = request.headers.get("x-session-id")
+        # El navegador web no envía x-session-id (R05). Si se recibe x-session-id (pruebas multi-perfil o API),
+        # tiene precedencia para permitir aislamiento entre peticiones del mismo cliente HTTP.
         raw_session = header_session or cookie_session
         is_new = False
 
@@ -35,10 +40,11 @@ class AnonymousSessionMiddleware(BaseHTTPMiddleware):
                 clean = sanitized
 
         if not clean:
-            clean = f"sess-{uuid.uuid4().hex}"
+            clean = f"sess-{secrets.token_urlsafe(24)}"
             is_new = True
 
-        request.state.session_id = clean
+        request.state.session_token = clean
+        request.state.session_id = derive_owner_id(clean)
 
         response = await call_next(request)
 
@@ -54,7 +60,7 @@ class AnonymousSessionMiddleware(BaseHTTPMiddleware):
                 max_age=86400 * 30,  # 30 días
                 path="/",
             )
-            response.headers["X-Session-Id"] = clean
+            # R05: Mantener el secreto solo en la cookie privada; no exponerlo en cabeceras de respuesta
 
         return response
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from app.config import settings
 from app.db.connection import connect
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,14 @@ def get_migration_files() -> list[Path]:
     if not MIGRATIONS_DIR.is_dir():
         return []
     return sorted(MIGRATIONS_DIR.glob("*.sql"), key=lambda p: p.name)
+
+
+def get_migration_connection(conninfo: str | None = None) -> psycopg.Connection:
+    """Abre una conexión directa para migraciones con rol DDL separado del rol web."""
+    url = conninfo or settings.migration_database_url or settings.database_url
+    if not url:
+        raise RuntimeError("Ni MIGRATION_DATABASE_URL ni DATABASE_URL están configuradas para migraciones.")
+    return psycopg.connect(url, autocommit=False)
 
 
 def apply_migrations(conn: psycopg.Connection) -> list[str]:
@@ -139,17 +149,34 @@ def check_database_ready() -> tuple[bool, dict[str, Any]]:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     logger.info("Iniciando verificación y migración de base de datos...")
-    with connect() as conn:
-        applied = apply_migrations(conn)
-        if applied:
-            logger.info("Migraciones aplicadas: %s", ", ".join(applied))
-        else:
-            logger.info("No hay migraciones pendientes.")
-        status = verify_schema(conn)
-        if status["ready"]:
-            logger.info("Esquema verificado y 100%% operacional.")
-        else:
-            logger.warning("El esquema presenta inconsistencias: %s", status)
+    try:
+        # 1. Comprobar primero con la conexión del pool web si el esquema efectivo ya cumple los contratos
+        try:
+            with connect() as conn:
+                status = verify_schema(conn)
+            if status["ready"]:
+                logger.info("Esquema de base de datos verificado y 100%% operacional.")
+                return
+        except Exception as check_exc:
+            logger.info("Verificación inicial con pool web no concluyente: %s", check_exc)
+
+        # 2. Si el esquema está incompleto o ausente, aplicar migraciones con el rol migrador
+        logger.info("Aplicando migraciones pendientes con la conexión de migración...")
+        with get_migration_connection() as mig_conn:
+            applied = apply_migrations(mig_conn)
+            if applied:
+                logger.info("Migraciones aplicadas: %s", ", ".join(applied))
+            else:
+                logger.info("No hay migraciones pendientes.")
+            status_after = verify_schema(mig_conn)
+            if status_after["ready"]:
+                logger.info("Esquema verificado y 100%% operacional tras migraciones.")
+            else:
+                logger.error("El esquema presenta inconsistencias críticas tras migrar: %s", status_after)
+                sys.exit(1)
+    except Exception as exc:
+        logger.error("Fallo crítico en el proceso de migración: %s", exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

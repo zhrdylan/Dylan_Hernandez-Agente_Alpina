@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 from app.config import DATA_DIR, settings
 
@@ -28,17 +28,22 @@ class DecryptionError(CryptoError):
 
 
 @lru_cache(maxsize=1)
-def get_fernet() -> Fernet:
-    """Obtiene e inicializa la instancia Fernet con validación estricta de clave."""
-    key = (settings.chat_encryption_key or "").strip()
-    if key:
-        try:
-            key_bytes = key.encode("utf-8") if isinstance(key, str) else key
-            return Fernet(key_bytes)
-        except Exception as exc:
-            raise CryptoError(
-                f"La clave CHAT_ENCRYPTION_KEY configurada no es válida para Fernet: {exc}"
-            ) from exc
+def get_fernet() -> MultiFernet:
+    """Obtiene e inicializa la instancia Fernet / MultiFernet con soporte para rotación de claves."""
+    raw_keys = (settings.chat_encryption_key or "").strip()
+    if raw_keys:
+        keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+        fernets = []
+        for k in keys:
+            try:
+                k_bytes = k.encode("utf-8") if isinstance(k, str) else k
+                fernets.append(Fernet(k_bytes))
+            except Exception as exc:
+                raise CryptoError(
+                    f"Una de las claves en CHAT_ENCRYPTION_KEY no es válida para Fernet: {exc}"
+                ) from exc
+        if fernets:
+            return MultiFernet(fernets)
 
     if settings.app_env.lower() == "production":
         raise CryptoError(
@@ -50,7 +55,7 @@ def get_fernet() -> Fernet:
     if key_path.is_file():
         try:
             persisted = key_path.read_text(encoding="utf-8").strip()
-            return Fernet(persisted.encode("utf-8"))
+            return MultiFernet([Fernet(persisted.encode("utf-8"))])
         except Exception:
             pass
 
@@ -65,7 +70,7 @@ def get_fernet() -> Fernet:
     except Exception as exc:
         logger.warning("No se pudo persistir la clave de desarrollo en disco: %s", exc)
 
-    return Fernet(new_key.encode("utf-8"))
+    return MultiFernet([Fernet(new_key.encode("utf-8"))])
 
 
 def encrypt_text(plain: Optional[str]) -> str:
@@ -114,3 +119,24 @@ def decrypt_text(cipher: Optional[str]) -> str:
 
     # Texto en plano heredado (migración retroactiva segura)
     return text
+
+
+def rotate_encrypted_text(cipher: Optional[str]) -> str:
+    """Rota un token Fernet cifrado con una clave anterior a la clave primaria activa.
+
+    Si el texto es plano o vacío, lo cifra directamente con la clave primaria.
+    """
+    if cipher is None:
+        return ""
+    text = str(cipher)
+    if not text:
+        return ""
+    if text.startswith("gAAAAA"):
+        try:
+            fernet = get_fernet()
+            rotated_bytes = fernet.rotate(text.encode("utf-8"))
+            return rotated_bytes.decode("utf-8")
+        except Exception as exc:
+            logger.error("Error al rotar token cifrado: %s", exc)
+            raise CryptoError(f"Error al rotar token: {exc}") from exc
+    return encrypt_text(text)

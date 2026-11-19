@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 import uuid
 from typing import Any
 from fastapi import HTTPException, Request
@@ -32,23 +34,49 @@ def get_agent_graph(request: Request) -> Any:
     return graph
 
 
-def get_current_session_id(request: Request) -> str:
-    """Extrae el identificador de sesión anónima validado del estado de la petición o cabecera/cookie."""
-    session_id = getattr(request.state, "session_id", None)
-    if session_id:
-        return session_id
+def derive_owner_id(session_token: str) -> str:
+    """Deriva un identificador de propietario interno determinista a partir del secreto de sesión.
 
-    # Fallback si no fue procesado por middleware (ej. llamadas internas o tests directos)
-    raw = request.headers.get("x-session-id") or request.cookies.get("alpina_session_id")
+    Mantiene el secreto privado fuera del almacenamiento y de las respuestas JSON (R05).
+    """
+    if not session_token:
+        return ""
+    clean = session_token.strip()
+    if clean.startswith("owner-") or clean.startswith("owner_"):
+        return clean
+    digest = hashlib.sha256(f"alpina_owner_salt_v1:{clean}".encode("utf-8")).hexdigest()[:32]
+    return f"owner_{digest}"
+
+
+def get_current_session_token(request: Request) -> str:
+    """Extrae o genera el secreto de sesión privado emitido por el servidor."""
+    token = getattr(request.state, "session_token", None)
+    if token:
+        return token
+
+    cookie_sess = request.cookies.get("alpina_session_id")
+    header_sess = request.headers.get("x-session-id")
+    raw = cookie_sess or header_sess
     if raw and raw.strip().lower() not in {"default", "null", "undefined"}:
         clean = "".join(c for c in raw.strip() if c.isalnum() or c in "-_.")[:64]
         if len(clean) >= 8:
-            request.state.session_id = clean
+            request.state.session_token = clean
             return clean
 
-    new_sess = f"sess-{uuid.uuid4().hex}"
-    request.state.session_id = new_sess
-    return new_sess
+    new_token = f"sess-{secrets.token_urlsafe(24)}"
+    request.state.session_token = new_token
+    return new_token
+
+
+def get_current_session_id(request: Request) -> str:
+    """Obtiene el identificador de propietario interno para aislamiento y consultas en base de datos."""
+    owner_id = getattr(request.state, "session_id", None)
+    if owner_id:
+        return owner_id
+    token = get_current_session_token(request)
+    owner = derive_owner_id(token)
+    request.state.session_id = owner
+    return owner
 
 
 def get_current_user_id(request: Request) -> str:

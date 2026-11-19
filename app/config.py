@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
 
     database_url: str = ""
+    migration_database_url: str = ""
 
     chat_encryption_key: str = ""
 

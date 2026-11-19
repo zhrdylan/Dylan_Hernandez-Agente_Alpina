@@ -20,7 +20,11 @@ _pool: ConnectionPool | None = None
 
 def _configure(connection: psycopg.Connection) -> None:
     connection.autocommit = False
-    register_vector(connection)
+    try:
+        register_vector(connection)
+    except Exception:
+        # En bases de datos vacías antes de instalar la extensión vector
+        pass
 
 
 def _get_pool() -> ConnectionPool:

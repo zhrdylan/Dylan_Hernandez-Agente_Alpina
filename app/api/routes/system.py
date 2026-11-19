@@ -15,15 +15,26 @@ def health(request: Request) -> dict[str, Any]:
     """Estado del servicio y del agente conversacional."""
     startup_error = getattr(request.app.state, "startup_error", None)
     agent_ready = getattr(request.app.state, "graph", None) is not None
-    if startup_error or not agent_ready:
+    is_ready = bool(getattr(request.app.state, "ready", agent_ready)) and agent_ready and not startup_error
+    if not is_ready:
         status = "degraded" if agent_ready else "error"
     else:
         status = "ok"
+    
+    # En desarrollo/pruebas expone la cadena técnica para depuración; en producción la redacta
+    err_display = (
+        str(startup_error)
+        if startup_error and settings.app_env != "production"
+        else ("Error durante el arranque del servicio." if startup_error else None)
+    )
+
     return {
         "status": status,
         "environment": settings.app_env,
         "agent_ready": agent_ready,
-        "startup_error": startup_error,
+        "database_ready": bool(getattr(request.app.state, "ready", False)),
+        "startup_error": err_display,
+        "error": "Error durante el arranque del servicio." if startup_error else None,
     }
 
 
