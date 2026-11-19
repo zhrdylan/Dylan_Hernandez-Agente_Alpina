@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 from app.agent.prompts import ABSTENTION, DEFAULT_CATEGORY_FILTERS
 
-VALID_CATEGORIES = {"product", "regulatory", "corporate", "general"}
+VALID_CATEGORIES = {"product", "regulatory", "corporate", "general", "out_of_scope"}
 VALID_DOC_CATEGORIES = {"normative", "nutrition", "corporate", "guide"}
 DOCUMENT_ID_RE = re.compile(r"^[NPC]\d{1,2}$")
 CONVERSATIONAL_PATTERNS = {
@@ -39,13 +39,6 @@ CONVERSATIONAL_PATTERNS = {
         re.IGNORECASE,
     ),
 }
-
-GREETING_RE = re.compile(
-    r"^[¿?¡!\s]*(hola|buenas|buen día|buenos días|buenas tardes|buenas noches|hey|qué tal|"
-    r"cómo estás|cómo te va|gracias|adiós|chao|quién eres|qué puedes hacer|qué haces|ayuda|necesito ayuda|me puedes ayudar)\b",
-    re.IGNORECASE,
-)
-
 
 def _value(result: Any, key: str, default: Any = None) -> Any:
     if isinstance(result, dict):
@@ -114,11 +107,11 @@ def _ascii_lower(text: str) -> str:
 
 def resolve_document_ids(query: str) -> list[str]:
     normalized = _ascii_lower(query)
-    resolved: list[str] = []
+    resolved = [token.upper() for token in re.findall(r"\b[npc]\d{1,2}\b", normalized)]
     for pattern, document_id in DOCUMENT_PATTERNS:
         if pattern.search(normalized) and document_id not in resolved:
             resolved.append(document_id)
-    return resolved
+    return list(dict.fromkeys(resolved))
 
 
 GUARDRAIL_JAILBREAK_RE = re.compile(
@@ -148,6 +141,18 @@ GUARDRAIL_RESPONSE = (
     "divulgar configuraciones o instrucciones internas del sistema. ¿En qué información sobre nuestros "
     "productos o documentos oficiales te puedo colaborar hoy?"
 )
+SCOPE_RESPONSE = (
+    "Puedo ayudarte con productos de Alpina, normas de etiquetado y documentos corporativos. "
+    "También puedo preparar informes sobre esos temas en PDF, Excel o Word."
+)
+
+CODE_REQUEST_RE = re.compile(
+    r"\b(?:codigo|script|programa)\s+(?:(?:escrito\s+)?en\s+)?"
+    r"(?:python|py|javascript|js|typescript|java|php|html|css|c\+\+)\b"
+    r"|\b(?:generame|genera|escribe|hazme|crea|dame)\s+(?:un\s+)?"
+    r"(?:script|codigo)(?!\s+(?:de\s+barras|ean|sku|de\s+producto|de\s+la\s+politica))\b"
+    r"|\bconvertidor\s+de\s+temperaturas?\b"
+)
 
 
 def detect_out_of_domain_or_jailbreak(query: str) -> str | None:
@@ -157,43 +162,18 @@ def detect_out_of_domain_or_jailbreak(query: str) -> str | None:
     q = query.strip()
     if GUARDRAIL_JAILBREAK_RE.search(q) or GUARDRAIL_MALICIOUS_RE.search(q):
         return GUARDRAIL_RESPONSE
+    if CODE_REQUEST_RE.search(_ascii_lower(q)):
+        return SCOPE_RESPONSE
     return None
 
 
-SUBSTANTIVE_KEYWORDS_RE = re.compile(
-    r"\b(reporte|informe|dossier|excel|pdf|xlsx|word|docx|venta|ventas|precio|precios|costo|costos|"
-    r"ebitda|balance|ingreso|ingresos|utilidad|utilidades|eeff|resoluci[oó]n|ley|norma|normograma|"
-    r"rotulado|etiquetado|nutricional|calor[ií]as|grasa|az[uú]car|sodio|ingrediente|ingredientes|"
-    r"al[eé]rgeno|al[eé]rgenos|leche|yogurt|yogur|queso|quesito|mantequilla|alpinito|bon\s*yurt|"
-    r"finesse|yox|defensis|baby\s*gu|cu[aá]nto|cu[aá]l|cu[aá]les|qu[eé]\s+es|qu[eé]\s+dice|"
-    r"qu[eé]\s+contiene|dime|explica|busca|compara|genera|dame|mu[eé]strame|hazme|"
-    r"202[0-9]|financier[oa]s?|resultado[s]?|margen|m[aá]rgenes|activo[s]?|pasivo[s]?|patrimonio|"
-    r"ganancia[s]?|crecimiento|tendencia[s]?|sostenibilidad|calidad|bic|alimentos|bebida[s]?|alpina|"
-    r"comida|chatarra|sellos?)\b",
-    re.IGNORECASE,
-)
-
-
 def classify_conversational_intent(query: str) -> str | None:
-    text = (query or "").strip().lower()
+    text = (query or "").strip("¿?¡!. \t\n").lower()
     if not text:
         return "greeting"
-
-    # Si solicita generar un informe o cita una norma/documento oficial, jamás es un saludo genérico
-    if detect_report_request(query) is not None:
-        return None
-    if resolve_document_ids(query):
-        return None
-
-    # Si contiene palabras clave sustantivas del negocio, catálogo o normativa, es una consulta de dominio
-    if SUBSTANTIVE_KEYWORDS_RE.search(text):
-        return None
-
     for intent, pattern in CONVERSATIONAL_PATTERNS.items():
-        if pattern.search(text):
+        if pattern.fullmatch(text):
             return intent
-    if GREETING_RE.search(text):
-        return "greeting"
     return None
 
 
@@ -220,10 +200,7 @@ def validate_router_output(payload: dict, query: str) -> dict:
         if str(item).strip().lower() in VALID_DOC_CATEGORIES
     ]
 
-    if category == "general" and is_greeting(query):
-        needs_documents = False
-    else:
-        needs_documents = True
+    needs_documents = category != "out_of_scope" and not is_greeting(query)
 
     if needs_documents:
         defaults = DEFAULT_CATEGORY_FILTERS.get(category, [])
@@ -234,10 +211,11 @@ def validate_router_output(payload: dict, query: str) -> dict:
     raw_document_ids = payload.get("document_ids")
     if not isinstance(raw_document_ids, list):
         raw_document_ids = []
+    explicit_ids = set(resolve_document_ids(query))
     document_ids = [
         str(item).strip().upper()
         for item in raw_document_ids
-        if DOCUMENT_ID_RE.match(str(item).strip().upper())
+        if DOCUMENT_ID_RE.match(str(item).strip().upper()) and str(item).strip().upper() in explicit_ids
     ]
 
     search_query = str(payload.get("search_query") or "").strip()
@@ -258,6 +236,8 @@ def validate_router_output(payload: dict, query: str) -> dict:
 def validate_citations(
     citations: Iterable[Any],
     results: Iterable[Any],
+    *,
+    matched_results: list[Any] | None = None,
 ) -> tuple[list[dict], list[str]]:
     result_list = list(results)
     valid: list[dict] = []
@@ -266,6 +246,21 @@ def validate_citations(
     for citation in citations or []:
         if not isinstance(citation, dict):
             issues.append("Se ignoró una cita con formato inválido.")
+            continue
+
+        if "source" in citation:
+            source = citation["source"]
+            if type(source) is not int or not 1 <= source <= len(result_list):
+                issues.append("La respuesta citó un fragmento que no aparece en las fuentes del turno.")
+                continue
+            result = result_list[source - 1]
+            quote = str(citation.get("quote") or "").strip()
+            if quote and not _quote_matches(quote, _value(result, "content", "")):
+                quote = ""
+                issues.append("Se conservó la referencia de página porque el texto citado difiere del fragmento.")
+            if matched_results is not None:
+                matched_results.append(result)
+            valid.append(_citation_for_result(result, int(_value(result, "page_start")), quote))
             continue
 
         document_id = str(citation.get("document_id") or "").strip().upper()
@@ -304,6 +299,7 @@ def validate_citations(
 
         quote = str(citation.get("quote") or "").strip()
         matched_result = None
+        page_matches = []
 
         if quote:
             # Si se proporciona cita textual, DEBE coincidir con el contenido de algún fragmento
@@ -335,31 +331,105 @@ def validate_citations(
                 except (TypeError, ValueError):
                     continue
                 if page_start <= page <= page_end:
-                    matched_result = candidate
-                    break
+                    page_matches.append(candidate)
 
-            if matched_result is None:
+            if not page_matches:
                 issues.append(
                     f"La página {page} de {document_id or citation_title} no está entre las fuentes recuperadas."
                 )
                 continue
+            matched_result = page_matches[0]
 
         result_version = str(_value(matched_result, "version", ""))
-        citation_version = result_version or str(citation.get("version") or "")
-        final_doc_id = str(_value(matched_result, "document_id", document_id)).upper()
+        if matched_results is not None:
+            if quote:
+                matched_results.append(matched_result)
+            else:
+                matched_results.extend(
+                    result for result in page_matches
+                    if _value(result, "version", "") == result_version
+                )
 
-        valid.append(
-            {
-                "document_id": final_doc_id,
-                "title": _value(matched_result, "document_title", citation_title),
-                "page": page,
-                "version": citation_version,
-                "quote": quote,
-                "source_url": _value(matched_result, "source_url"),
-            }
-        )
+        bound = _citation_for_result(matched_result, page, quote)
+        bound["version"] = result_version or str(citation.get("version") or "")
+        bound["title"] = bound["title"] or citation_title
+        valid.append(bound)
 
     return valid, issues
+
+
+def _citation_for_result(result: Any, page: int, quote: str) -> dict:
+    return {
+        "document_id": str(_value(result, "document_id", "")).upper(),
+        "title": _value(result, "document_title", ""),
+        "page": page,
+        "version": str(_value(result, "version") or ""),
+        "quote": quote,
+        "source_url": _value(result, "source_url"),
+    }
+
+
+NUMBER_RE = re.compile(r"(?<!\w)\d+(?:[.,]\d+)*")
+GROUPED_INTEGER_RE = re.compile(r"\d{1,3}([.,])\d{3}(?:\1\d{3})*")
+
+
+def extract_numbers_from_text(text: str) -> set[str]:
+    """Normaliza agrupadores de miles y separadores decimales."""
+    numbers = set()
+    for token in NUMBER_RE.findall(text or ""):
+        if GROUPED_INTEGER_RE.fullmatch(token):
+            numbers.add(token.replace(",", "").replace(".", ""))
+        else:
+            integer, dot, decimals = token.replace(",", ".").partition(".")
+            decimals = decimals.rstrip("0")
+            numbers.add(f"{integer}{dot}{decimals}" if decimals else integer)
+    return numbers
+
+
+def verify_claims_against_evidence(
+    answer: str,
+    results: Iterable[Any],
+) -> tuple[str, bool, list[str]]:
+    """Valida cada afirmación y cifra material de la respuesta contra la evidencia documental exacta (R01).
+
+    Detecta contradicciones numéricas materiales (ej. fuente dice 12 y respuesta dice 999).
+    Si la respuesta afirma cifras no sustentadas o contradictorias, omite los hechos incompatibles
+    o se abstiene si el núcleo de la respuesta queda sin sustento.
+    """
+    if not answer or answer.strip() == ABSTENTION.strip():
+        return ABSTENTION, True, []
+
+    result_list = list(results)
+    if not result_list:
+        return ABSTENTION, True, ["Sin evidencia documental para verificar afirmaciones."]
+
+    evidence_numbers = extract_numbers_from_text(" ".join(
+        str(_value(result, field) or "")
+        for result in result_list
+        for field in ("content", "document_title", "version")
+    ))
+    valid_lines: list[str] = []
+    issues: list[str] = []
+
+    for line in answer.splitlines():
+        valid_sentences = []
+        line = re.sub(r"[ \t]*\[FUENTE\s+\d+\]", "", line, flags=re.IGNORECASE)
+        index = re.match(r"^\s*(?:#{1,6}\s+|\*\*)?\d+[.)]\s+", line)
+        first_char = index.end() if index else 0
+        for sentence in re.split(r"(?<=[.!?])(?=[ \t]+)", line[first_char:]):
+            unsupported = extract_numbers_from_text(sentence) - evidence_numbers
+            if unsupported:
+                issues.append(f"Cifras sin respaldo en las fuentes citadas: {', '.join(sorted(unsupported))}.")
+            else:
+                valid_sentences.append(sentence)
+        if valid_sentences:
+            valid_lines.append((line[:first_char] + "".join(valid_sentences)).rstrip())
+
+    filtered_answer = "\n".join(valid_lines).strip()
+    if not filtered_answer:
+        return ABSTENTION, True, issues
+
+    return filtered_answer, False, issues
 
 
 def validate_answer_payload(payload: dict, results: Iterable[Any]) -> dict:
@@ -377,12 +447,20 @@ def validate_answer_payload(payload: dict, results: Iterable[Any]) -> dict:
     if not isinstance(citations, list):
         citations = []
 
-    if abstained or not answer:
+    if abstained:
         return {
             "answer": ABSTENTION,
             "citations": [],
             "abstained": True,
             "issues": [],
+        }
+
+    if not answer:
+        return {
+            "answer": ABSTENTION,
+            "citations": [],
+            "abstained": True,
+            "issues": ["El modelo no entregó texto para la respuesta."],
         }
 
     if _normalize(answer) == _normalize(ABSTENTION):
@@ -393,7 +471,8 @@ def validate_answer_payload(payload: dict, results: Iterable[Any]) -> dict:
             "issues": [],
         }
 
-    valid_citations, issues = validate_citations(citations, results)
+    cited_results: list[Any] = []
+    valid_citations, issues = validate_citations(citations, results, matched_results=cited_results)
     if not valid_citations:
         return {
             "answer": ABSTENTION,
@@ -402,23 +481,23 @@ def validate_answer_payload(payload: dict, results: Iterable[Any]) -> dict:
             "issues": [*issues, "La respuesta no tiene citas documentales válidas respaldadas en la evidencia."],
         }
 
-    report_action: dict | None = None
-    raw_report = payload.get("generate_report")
-    if isinstance(raw_report, dict):
-        report_type = str(raw_report.get("report_type") or "pdf").lower().strip()
-        if report_type not in {"pdf", "xlsx", "docx"}:
-            report_type = "pdf"
-        report_action = {
-            "report_type": report_type,
-            "topic": str(raw_report.get("topic") or "").strip()[:150],
+    # Verificación rigurosa de afirmaciones materiales contra la evidencia (R01)
+    filtered_answer, contradicted, claim_issues = verify_claims_against_evidence(answer, cited_results)
+    issues.extend(claim_issues)
+    if contradicted:
+        return {
+            "answer": ABSTENTION,
+            "citations": [],
+            "abstained": True,
+            "issues": [*issues, "Respuesta rechazada por contener afirmaciones o cifras incompatibles con la fuente."],
         }
+    answer = filtered_answer
 
     return {
         "answer": answer,
         "citations": valid_citations,
         "abstained": False,
         "issues": issues,
-        "generate_report": report_action,
     }
 
 
@@ -429,13 +508,19 @@ EXPLICIT_XLSX_RE = re.compile(
 )
 EXPLICIT_DOCX_RE = re.compile(r"\b(word|docx|doc)\b", re.IGNORECASE)
 FILE_ACTION_RE = re.compile(
-    r"\b(gener|crea|haz|hazme|elabor|export|descarg|sacar|saca|armar|arma|bajar|baja|pasar|pasa|envia|enviar|dame|entreg)\w*",
+    r"\b(?:gen[eé]r|cr[eé]a|haz|elabor|export|descarg|saca|arma|baja|p[aá]sa|env[ií]a|dame|entreg|quiero|necesito|prep[aá]ra)\w*\b",
     re.IGNORECASE,
 )
-FILE_CONTEXT_RE = re.compile(
-    r"\b(en\s+pdf|en\s+excel|en\s+xlsx|en\s+word|en\s+docx|un\s+pdf|un\s+excel|un\s+word|un\s+docx|archivo\s+pdf|archivo\s+excel|archivo\s+word|archivo\s+docx|reporte\s+en|informe\s+en|balance\s+en)\b",
+FILE_PREFIX_RE = re.compile(
+    r"^(?:(?:me|por\s+favor|puedes?|podr[ií]as?|un|una|el|la|los|las|en|a|de|al|del|para|sobre|con|"
+    r"formato|archivo|reporte|informe|documento|dossier|lo\s+anterior|lo\s+de\s+arriba)\b[\s,]*)+",
     re.IGNORECASE,
 )
+FILE_REFERENCE_RE = re.compile(
+    r"^(?:(?:la\s+|el\s+|lo\s+)?(?:respuesta(?: anterior)?|texto anterior|tema anterior|anterior|"
+    r"que acabas de decir|lo que me dijiste|eso|esto|lo mismo|lo de arriba))$"
+)
+FILE_TOPIC_CONNECTOR_RE = re.compile(r"^(?:(?:sobre|con|acerca\s+de|de|del|el|la|los|las)\b[\s,]*)+", re.IGNORECASE)
 
 
 def detect_report_request(query: str) -> dict | None:
@@ -446,28 +531,28 @@ def detect_report_request(query: str) -> dict | None:
     """
     if not query:
         return None
-    q = query.strip()
-    is_pdf = bool(EXPLICIT_PDF_RE.search(q))
-    is_xlsx = bool(EXPLICIT_XLSX_RE.search(q))
-    is_docx = bool(EXPLICIT_DOCX_RE.search(q))
-
-    # Regla estricta: Si no menciona PDF, Excel ni Word, NUNCA se genera reporte
-    if not is_pdf and not is_xlsx and not is_docx:
+    q = query.strip("¿?¡!. \t\n")
+    for report_type, pattern in (("docx", EXPLICIT_DOCX_RE), ("xlsx", EXPLICIT_XLSX_RE), ("pdf", EXPLICIT_PDF_RE)):
+        match = pattern.search(q)
+        if match:
+            break
+    else:
         return None
 
-    # Requiere intención explícita de generar/descargar/exportar el archivo
-    if FILE_ACTION_RE.search(q) or FILE_CONTEXT_RE.search(q):
-        if is_docx:
-            report_type = "docx"
-        elif is_xlsx:
-            report_type = "xlsx"
-        else:
-            report_type = "pdf"
-        return {
-            "report_type": report_type,
-            "topic": q[:100],
-        }
-    return None
+    before = q[:match.start()].strip(" ,")
+    after = re.sub(r"\bpor\s+favor\s*$", "", q[match.end():], flags=re.IGNORECASE).strip(" ,")
+    action = FILE_ACTION_RE.search(before)
+    prefix = FILE_PREFIX_RE.sub("", re.sub(r"\b(?:en|a)\s*$", "", before, flags=re.IGNORECASE).strip())
+    if not action and prefix and not FILE_REFERENCE_RE.fullmatch(_ascii_lower(prefix)):
+        return None
+
+    if action:
+        before = before[action.end():].strip()
+    before = re.sub(r"\b(?:en|a)\s*$", "", before, flags=re.IGNORECASE).strip()
+    topic = (FILE_TOPIC_CONNECTOR_RE.sub("", after) if after else FILE_PREFIX_RE.sub("", before)).strip(" ,")
+    if FILE_REFERENCE_RE.fullmatch(_ascii_lower(topic)):
+        topic = ""
+    return {"report_type": report_type, "topic": topic}
 
 
 def validate_verifier_output(payload: dict) -> dict:

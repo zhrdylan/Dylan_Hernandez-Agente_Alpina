@@ -14,6 +14,8 @@ class LlmError(RuntimeError):
     pass
 
 
+GPT_OSS_MODELS = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+STRUCTURED_MODELS = GPT_OSS_MODELS | {"qwen/qwen3.8-27b", "meta-models/muse-spark-open"}
 _client: Groq | None = None
 
 
@@ -22,7 +24,7 @@ def _get_client() -> Groq:
     if _client is None:
         if not settings.groq_api_key:
             raise LlmError("GROQ_API_KEY no está configurada en el archivo .env.")
-        _client = Groq(api_key=settings.groq_api_key)
+        _client = Groq(api_key=settings.groq_api_key, timeout=25.0, max_retries=0)
     return _client
 
 
@@ -43,19 +45,6 @@ def parse_json_content(content: str) -> dict:
     if isinstance(payload, dict):
         return payload
 
-    decoder = json.JSONDecoder()
-    candidates: list[dict] = []
-    for match in re.finditer(r"\{", text):
-        try:
-            candidate, _ = decoder.raw_decode(text[match.start() :])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(candidate, dict):
-            candidates.append(candidate)
-
-    if candidates:
-        return candidates[-1]
-
     raise LlmError("La respuesta del modelo no contiene un objeto JSON válido.")
 
 
@@ -71,6 +60,7 @@ def _chat(
 ) -> str:
     client = _get_client()
     last_error: Exception | None = None
+    reasoning = {"reasoning_effort": "low"} if model in GPT_OSS_MODELS else {}
 
     for attempt in range(max_retries + 1):
         try:
@@ -78,12 +68,16 @@ def _chat(
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_tokens,
                 top_p=0.9,
                 seed=42,
                 response_format=response_format,
+                **reasoning,
             )
-            content = response.choices[0].message.content or ""
+            choice = response.choices[0]
+            if choice.finish_reason != "stop":
+                raise LlmError(f"Groq no completó la respuesta ({choice.finish_reason}).")
+            content = choice.message.content or ""
             if not content.strip():
                 raise LlmError("El modelo devolvió contenido vacío.")
             return content
@@ -96,12 +90,24 @@ def _chat(
                 or "connection" in name
                 or "timeout" in name
             )
-            if retryable and attempt < max_retries:
-                sleep_fn(min(2**attempt, 30))
+            delay = 2**attempt
+            if status == 429:
+                headers = getattr(getattr(exc, "response", None), "headers", {})
+                try:
+                    delay = max(delay, float(headers.get("retry-after", 0)))
+                except (TypeError, ValueError):
+                    pass
+            if retryable and attempt < max_retries and delay <= 4:
+                sleep_fn(delay)
                 continue
             break
 
-    raise LlmError(f"Groq falló: {type(last_error).__name__}: {last_error}")
+    if isinstance(last_error, LlmError):
+        raise last_error
+    status = getattr(last_error, "status_code", None)
+    code = getattr(last_error, "code", None)
+    details = ", ".join(str(value) for value in (type(last_error).__name__, status, code) if value)
+    raise LlmError(f"Groq ({model}) falló: {details}.") from last_error
 
 
 def chat_json(
@@ -112,7 +118,8 @@ def chat_json(
     temperature: float = 0.0,
     max_tokens: int = 800,
     fallback_model: str | None = None,
-    max_retries: int = 2,
+    schema: dict | None = None,
+    max_retries: int = 1,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> dict:
     messages = [
@@ -120,36 +127,32 @@ def chat_json(
         {"role": "user", "content": user},
     ]
 
-    try:
-        content = _chat(
-            model,
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-            max_retries=max_retries,
-            sleep_fn=sleep_fn,
+    models = dict.fromkeys(candidate for candidate in (model, fallback_model) if candidate)
+    errors = []
+    for candidate in models:
+        response_format = (
+            {"type": "json_schema", "json_schema": {**schema, "strict": True}}
+            if schema and candidate in STRUCTURED_MODELS
+            else {"type": "json_object"}
         )
-        return parse_json_content(content)
-    except Exception as primary_error:
-        if fallback_model and fallback_model != model:
-            try:
-                content = _chat(
-                    fallback_model,
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    response_format=None,
-                    max_retries=max_retries,
-                    sleep_fn=sleep_fn,
-                )
-                return parse_json_content(content)
-            except Exception as fallback_error:
-                raise LlmError(
-                    f"Modelo principal y fallback fallaron: "
-                    f"{primary_error}; {fallback_error}"
-                ) from fallback_error
-        raise LlmError(str(primary_error)) from primary_error
+        budget = min(max_tokens, 750) if candidate != model else max_tokens
+        try:
+            content = _chat(
+                candidate,
+                messages,
+                temperature=temperature,
+                max_tokens=budget,
+                response_format=response_format,
+                max_retries=max_retries,
+                sleep_fn=sleep_fn,
+            )
+            payload = parse_json_content(content)
+            if schema and not set(schema["schema"]["required"]).issubset(payload):
+                raise LlmError("El modelo devolvió un objeto JSON incompleto.")
+            return payload
+        except LlmError as exc:
+            errors.append(str(exc))
+    raise LlmError("; ".join(errors))
 
 
 def chat_text(

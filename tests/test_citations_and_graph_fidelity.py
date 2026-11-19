@@ -124,3 +124,130 @@ def test_verify_node_unverified_on_abstention_and_guardrail():
     }
     v_guard = verify_node(state_guard)
     assert v_guard["verified"] is False
+
+
+def test_r01_contradicted_number_rejected_and_abstained():
+    """R01: Fuente dice 12 unidades y modelo responde 999 unidades -> NO debe publicar 999 verificado."""
+    results = [
+        {
+            "document_id": "C1",
+            "document_title": "Informe de Gestión 2026",
+            "page_start": 4,
+            "page_end": 4,
+            "content": "En la planta Sopó se produjeron 12 unidades durante la prueba piloto.",
+            "version": "2026",
+            "source_url": "https://example.com/c1.pdf",
+        }
+    ]
+
+    # Modelo devuelve 999 unidades pero adjunta la frase válida de la fuente
+    payload_999 = {
+        "answer": "En la planta Sopó se produjeron 999 unidades durante la prueba piloto.",
+        "citations": [
+            {
+                "document_id": "C1",
+                "page": 4,
+                "quote": "se produjeron 12 unidades",
+            }
+        ],
+    }
+
+    validated_999 = validate_answer_payload(payload_999, results)
+    # Debe rechazar la afirmación numérica contradictoria/no sustentada y abstenerse
+    assert validated_999["abstained"] is True
+    assert validated_999["answer"] == ABSTENTION
+    assert len(validated_999["citations"]) == 0
+
+    # Comprobar en verify_node
+    state = {
+        "answer": validated_999["answer"],
+        "citations": validated_999["citations"],
+        "abstained": validated_999["abstained"],
+        "needs_documents": True,
+        "category": "general",
+    }
+    v_out = verify_node(state)
+    assert v_out["verified"] is False
+    assert v_out["abstained"] is True
+
+
+def test_r01_supported_number_verified():
+    """R01: Fuente dice 12 unidades y respuesta dice 12 unidades -> Aprobado y verificado."""
+    results = [
+        {
+            "document_id": "C1",
+            "document_title": "Informe de Gestión 2026",
+            "page_start": 4,
+            "page_end": 4,
+            "content": "En la planta Sopó se produjeron 12 unidades durante la prueba piloto.",
+            "version": "2026",
+            "source_url": "https://example.com/c1.pdf",
+        }
+    ]
+
+    payload_12 = {
+        "answer": "En la planta Sopó se produjeron 12 unidades durante la prueba piloto.",
+        "citations": [
+            {
+                "document_id": "C1",
+                "page": 4,
+                "quote": "se produjeron 12 unidades",
+            }
+        ],
+    }
+
+    validated_12 = validate_answer_payload(payload_12, results)
+    assert validated_12["abstained"] is False
+    assert "12 unidades" in validated_12["answer"]
+    assert len(validated_12["citations"]) == 1
+
+    state = {
+        "answer": validated_12["answer"],
+        "citations": validated_12["citations"],
+        "abstained": validated_12["abstained"],
+        "needs_documents": True,
+        "category": "general",
+    }
+    v_out = verify_node(state)
+    assert v_out["verified"] is True
+    assert v_out["abstained"] is False
+    assert len(v_out["citations"]) == 1
+
+
+def test_r02_general_category_retains_citations_when_needs_documents():
+    """R02: category='general' con needs_documents=True conserva citas y estado verificado."""
+    state = {
+        "answer": "Las ventas de 2025 alcanzaron $2.458 B según los estados financieros oficiales.",
+        "citations": [
+            {
+                "document_id": "C4",
+                "title": "Estados Financieros Separados 2025",
+                "page": 2,
+                "quote": "ingresos ordinarios sumaron $2.458 B",
+            }
+        ],
+        "abstained": False,
+        "needs_documents": True,
+        "category": "general",
+    }
+    v_out = verify_node(state)
+    assert v_out["verified"] is True
+    assert v_out["abstained"] is False
+    assert len(v_out["citations"]) == 1
+    assert v_out["citations"][0]["document_id"] == "C4"
+
+
+def test_r02_general_category_abstains_correctly_when_no_citations():
+    """R02: category='general' con needs_documents=True y cero citas devuelve abstención correcta."""
+    state = {
+        "answer": "No consta en los documentos.",
+        "citations": [],
+        "abstained": False,
+        "needs_documents": True,
+        "category": "general",
+    }
+    v_out = verify_node(state)
+    assert v_out["verified"] is False
+    assert v_out["abstained"] is True
+    assert v_out["answer"] == ABSTENTION
+    assert len(v_out["citations"]) == 0

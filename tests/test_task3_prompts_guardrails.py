@@ -6,7 +6,7 @@ from app.agent.validation import (
     validate_router_output,
     GUARDRAIL_RESPONSE,
 )
-from app.agent.prompts import ANSWER_SYSTEM, GUARD_RAILS
+from app.agent.prompts import ANSWER_SCHEMA, ANSWER_SYSTEM, GUARD_RAILS
 
 
 def test_guardrails_off_domain_and_jailbreaks():
@@ -51,11 +51,32 @@ def test_docx_report_detection():
 
 
 def test_answer_system_prompt_guidelines():
-    # Verify the prompt does not have the old 120-word limit
-    assert "máximo 6 viñetas o 120 palabras" not in ANSWER_SYSTEM
-    # Verify analytical and strategic recommendation requirements
-    assert "Diagnóstico" in ANSWER_SYSTEM
-    assert "Hallazgos Cuantitativos y Cualitativos" in ANSWER_SYSTEM
-    assert "Recomendaciones Estratégicas para la Toma de Decisiones" in ANSWER_SYSTEM
-    assert "docx" in ANSWER_SYSTEM
-    assert "GUARD_RAILS" in globals() or len(GUARD_RAILS) > 0
+    assert "base declarada" in ANSWER_SYSTEM
+    assert "unidad original" in ANSWER_SYSTEM
+    assert ANSWER_SCHEMA["schema"]["required"] == ["answer", "citations", "abstained"]
+
+
+@pytest.mark.parametrize("query", [
+    "Generame un codigo en py",
+    "Quiero un convertidor de temperaturas",
+    "Generame un Word con un codigo en py sobre un convertidor de temperaturas",
+])
+def test_off_domain_code_is_rejected(query):
+    assert detect_out_of_domain_or_jailbreak(query)
+
+
+def test_greetings_and_code_of_a_product():
+    assert classify_conversational_intent("¡Hola!") == "greeting"
+    assert classify_conversational_intent("Hola, hazme un convertidor de temperaturas") is None
+    assert detect_out_of_domain_or_jailbreak("Dame un código de barras del yogurt") is None
+
+
+@pytest.mark.parametrize(("query", "report_type", "topic"), [
+    ("Quiero un PDF", "pdf", ""),
+    ("Pásamelo a Word", "docx", ""),
+    ("Dame la respuesta en PDF", "pdf", ""),
+    ("Genérame un PDF del informe de gestión", "pdf", "informe de gestión"),
+    ("Genérame un reporte en Excel con los resultados financieros de 2025", "xlsx", "resultados financieros de 2025"),
+])
+def test_report_detector_recovers_topic(query, report_type, topic):
+    assert detect_report_request(query) == {"report_type": report_type, "topic": topic}
