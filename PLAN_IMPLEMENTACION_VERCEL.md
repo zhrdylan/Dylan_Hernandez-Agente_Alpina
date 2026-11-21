@@ -149,7 +149,7 @@ Plan de Implementación: Alineación Integral para Despliegue en Vercel
 
   Steps:
 
-  [ ] 7.1 Cargar en Vercel (Project Settings → Environment Variables):
+  [x] 7.1 Cargar en Vercel (Project Settings → Environment Variables):
       • APP_ENV = production
       • TRUSTED_HOSTS = ["*"] (O ["*.vercel.app"])
       • DATABASE_URL = postgresql://alpina_app:...@...pooler.supabase.com:6543/postgres
@@ -166,29 +166,29 @@ Plan de Implementación: Alineación Integral para Despliegue en Vercel
 
   Steps:
 
-  [ ] 8.1 Ejecutar vc para inicializar el proyecto y generar un despliegue de Preview.
-  [ ] 8.2 Comprobar en los logs de construcción que Vercel detecte el runtime @vercel/python y finalice la instalación de requirements.txt exitosamente.
+  [x] 8.1 Ejecutar vc para inicializar el proyecto y generar un despliegue de Preview.
+  [x] 8.2 Comprobar en los logs de construcción que Vercel detecte el runtime @vercel/python y finalice la instalación de requirements.txt exitosamente.
   ──────
   #### Task 9: Auditoría con access-protected-vercel-deployment
 
   Steps:
 
-  [ ] 9.1 Verificar el estado del servicio en el despliegue protegido usando vc curl:
+  [x] 9.1 Verificar el estado del servicio en el despliegue protegido usando vc curl:
     vc curl https://<deployment-url>.vercel.app/health
   Confirmar que la respuesta retorne {"status": "ok"}.
-  [ ] 9.2 Probar la creación de un chat mediante vc curl:
+  [x] 9.2 Probar la creación de un chat mediante vc curl:
     vc curl https://<deployment-url>.vercel.app/api/chats -X POST -H "Content-Type: application/json" -d '{"title":"Prueba Vercel"}'
 
-  [ ] 9.3 Si se realizan pruebas con herramientas de automatización de navegador (Playwright/agent-browser), adjuntar la cabecera OIDC:
+  [x] 9.3 Si se realizan pruebas con herramientas de automatización de navegador (Playwright/agent-browser), adjuntar la cabecera OIDC:
     x-vercel-trusted-oidc-idp-token: <VERCEL_OIDC_TOKEN>
 
-  [ ] 9.4 Si se observa un error TRUSTED_SOURCES_ENVIRONMENT_MISMATCH, acudir a Settings → Deployment Protection → Trusted Sources y habilitar la transición
+  [x] 9.4 Si se observa un error TRUSTED_SOURCES_ENVIRONMENT_MISMATCH, acudir a Settings → Deployment Protection → Trusted Sources y habilitar la transición
   development → production.
   ──────
   #### Task 10: Promoción a Producción
 
   Steps:
 
-  [ ] 10.1 Ejecutar vc --prod para desplegar la versión validada en el dominio principal de producción.
-  [ ] 10.2 Validar desde el navegador la interfaz gráfica (app/static/index.html), el flujo de conversación con el agente y la apertura de citas en el Visor de
+  [x] 10.1 Ejecutar vc --prod para desplegar la versión validada en el dominio principal de producción.
+  [x] 10.2 Validar desde el navegador la interfaz gráfica (app/static/index.html), el flujo de conversación con el agente y la apertura de citas en el Visor de
   Evidencias.
