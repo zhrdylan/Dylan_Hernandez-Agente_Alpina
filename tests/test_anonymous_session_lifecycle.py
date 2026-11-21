@@ -7,7 +7,7 @@ from app.core.crypto import encrypt_text, decrypt_text, EncryptionError, Decrypt
 
 
 def test_anonymous_session_cookie_issuance():
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://localhost")
     # Request without session header or cookie
     resp = client.get("/api/chats")
     assert resp.status_code == 200
@@ -20,7 +20,7 @@ def test_anonymous_session_cookie_issuance():
 
 
 def test_cross_session_report_isolation():
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://localhost")
     sess1 = f"sess-{uuid.uuid4().hex}"
     sess2 = f"sess-{uuid.uuid4().hex}"
 
@@ -51,19 +51,18 @@ def test_corrupt_fernet_token_raises_decryption_error():
 def test_key_rotation_with_multifernet(monkeypatch):
     from cryptography.fernet import Fernet
     from app.config import settings
-    from app.core.crypto import rotate_encrypted_text, get_fernet
+    from app.core.crypto import rotate_encrypted_text
 
     old_key = Fernet.generate_key().decode()
     new_key = Fernet.generate_key().decode()
 
     # Cifrar con clave antigua
-    old_f = Fernet(old_key.encode())
     plain = "Información confidencial para rotación de claves Alpina"
-    old_token = old_f.encrypt(plain.encode()).decode()
+    monkeypatch.setattr(settings, "chat_encryption_key", old_key)
+    old_token = encrypt_text(plain)
 
     # Configurar MultiFernet con new_key como primaria y old_key como secundaria
     monkeypatch.setattr(settings, "chat_encryption_key", f"{new_key},{old_key}")
-    get_fernet.cache_clear()
 
     # Descifrado transparente usando la clave secundaria
     assert decrypt_text(old_token) == plain
@@ -73,4 +72,7 @@ def test_key_rotation_with_multifernet(monkeypatch):
     assert rotated != old_token
     new_f = Fernet(new_key.encode())
     assert new_f.decrypt(rotated.encode()).decode() == plain
-    get_fernet.cache_clear()
+    monkeypatch.setattr(settings, "chat_encryption_key", new_key)
+    with pytest.raises(DecryptionError):
+        decrypt_text(old_token)
+    assert decrypt_text(rotated) == plain

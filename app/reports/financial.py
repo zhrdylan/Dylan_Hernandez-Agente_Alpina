@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from app.reports.spec import ReportSection, ReportTable
 
+from app.core.utils import get_value
 
 FINANCIAL_KEYWORDS = {
-    "venta", "ventas", "ingreso", "ingresos", "financier", "financiero",
-    "financiera", "financieros", "balance", "ebitda", "utilidad", "utilidades",
+    "venta", "ventas", "ingreso", "ingresos", "financiero",
+    "financiera", "financieros", "financieras", "balance", "ebitda", "utilidad", "utilidades",
     "eeff", "costo", "costos", "p&l", "perdida", "pérdida", "ganancia",
     "ganancias", "activo", "activos", "pasivo", "pasivos", "patrimonio",
-    "ejercicio", "tributar", "impuesto", "impuestos", "renta",
+    "ejercicio", "tributar", "tributario", "tributaria", "tributarios", "tributarias", "impuesto", "impuestos", "renta",
     "margen", "márgenes", "dividendo", "dividendos", "estados financieros",
 }
+FINANCIAL_KEYWORD_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(term).replace(r"\ ", r"\s+") for term in sorted(FINANCIAL_KEYWORDS)) + r")\b",
+    re.IGNORECASE,
+)
 STATEMENT_SCOPES = {"C4": "Separados", "C5": "Consolidados"}
 STATEMENT_METRICS = (
     "Ingresos de actividades ordinarias",
@@ -31,16 +35,10 @@ DETAILED_FINANCIAL_QUESTION_RE = re.compile(
 
 
 def is_financial_query(query: str, citations: list[Any] | None = None) -> bool:
-    q_lower = (query or "").lower()
-    matches = sum(1 for kw in FINANCIAL_KEYWORDS if kw in q_lower)
-    if matches >= 1:
-        return True
-    if citations:
-        for c in citations:
-            doc_id = str(c.get("document_id") if isinstance(c, dict) else getattr(c, "document_id", "")).upper()
-            if doc_id in {"C4", "C5"}:  # Estados Financieros Separados y Consolidados
-                return True
-    return False
+    return bool(FINANCIAL_KEYWORD_RE.search(query or "")) or any(
+        str(get_value(citation, "document_id", "")).upper() in STATEMENT_SCOPES
+        for citation in citations or []
+    )
 
 
 def financial_statement_answer(query: str, results: list[dict]) -> dict | None:
@@ -95,51 +93,3 @@ def financial_statement_answer(query: str, results: list[dict]) -> dict | None:
         "citations": citations,
         "abstained": False,
     }
-
-
-TABLE_SEPARATOR_RE = re.compile(r"^\|(?:[ \t]*:?-{3,}:?[ \t]*\|)+[ \t]*$", re.MULTILINE)
-MARKDOWN_TABLE_RE = re.compile(
-    r"^(\|[^\n]+\|)[ \t]*\n(\|[^\n]+\|)[ \t]*\n((?:\|[^\n]+\|[ \t]*(?:\n|$))+)",
-    re.MULTILINE,
-)
-
-
-def get_financial_sections(
-    query: str,
-    answer_paragraphs: list[str],
-    answer_bullets: list[str],
-    citations: list[Any] | None = None,
-) -> list[ReportSection]:
-    """Construye las secciones a partir del texto y las tablas de la respuesta citada."""
-    narrative = []
-    tables = []
-
-    def replace_table(match: re.Match[str]) -> str:
-        if not TABLE_SEPARATOR_RE.fullmatch(match[2].strip()):
-            return match[0]
-        columns = [cell.strip().strip("*") for cell in match[1].strip("|").split("|")]
-        rows = [
-            [cell.strip().strip("*") for cell in line.strip().strip("|").split("|")]
-            for line in match[3].splitlines()
-        ]
-        if not rows or not all(len(row) == len(columns) for row in rows):
-            return match[0]
-        tables.append(ReportSection(
-            heading="Cifras de la respuesta",
-            table=ReportTable(title="Cifras citadas", columns=columns, rows=rows),
-        ))
-        return ""
-
-    for paragraph in answer_paragraphs:
-        remaining = MARKDOWN_TABLE_RE.sub(replace_table, paragraph).strip()
-        if remaining:
-            narrative.append(remaining)
-
-    return [
-        ReportSection(
-            heading="Resultados financieros",
-            body=narrative,
-            bullets=answer_bullets,
-        ),
-        *tables,
-    ]

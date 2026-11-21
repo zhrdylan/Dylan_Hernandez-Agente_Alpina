@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +8,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.config import settings
+from app.core.utils import ascii_fold
 
 
 class R2StorageError(RuntimeError):
@@ -56,17 +56,7 @@ class R2Storage:
             return None
         sanitized: dict[str, str] = {}
         for key, value in metadata.items():
-            normalized_key = (
-                unicodedata.normalize("NFKD", str(key))
-                .encode("ascii", "ignore")
-                .decode("ascii")
-            )
-            normalized_value = (
-                unicodedata.normalize("NFKD", str(value))
-                .encode("ascii", "ignore")
-                .decode("ascii")
-            )
-            sanitized[normalized_key[:128]] = normalized_value[:1024]
+            sanitized[ascii_fold(str(key))[:128]] = ascii_fold(str(value))[:1024]
         return sanitized
 
     @classmethod

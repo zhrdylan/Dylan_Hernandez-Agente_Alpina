@@ -8,11 +8,12 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.config import settings
-from app.db.connection import connect
+from app.db.connection import close_pool, connect
 
 logger = logging.getLogger(__name__)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+SESSION_TABLES = {"chats", "messages", "reports", "audit_events"}
 
 
 def get_migration_files() -> list[Path]:
@@ -24,9 +25,9 @@ def get_migration_files() -> list[Path]:
 
 def get_migration_connection(conninfo: str | None = None) -> psycopg.Connection:
     """Abre una conexión directa para migraciones con rol DDL separado del rol web."""
-    url = conninfo or settings.migration_database_url or settings.database_url
+    url = conninfo or settings.migration_database_url
     if not url:
-        raise RuntimeError("Ni MIGRATION_DATABASE_URL ni DATABASE_URL están configuradas para migraciones.")
+        raise RuntimeError("Configura MIGRATION_DATABASE_URL con el rol migrador para aplicar el esquema.")
     return psycopg.connect(url, autocommit=False)
 
 
@@ -107,7 +108,7 @@ def verify_schema(conn: psycopg.Connection) -> dict[str, Any]:
             """
             select pg_get_constraintdef(oid) as def
             from pg_constraint
-            where conrelid = 'public.reports'::regclass
+            where conrelid = to_regclass('public.reports')
               and conname = 'reports_report_type_check';
             """
         )
@@ -115,7 +116,22 @@ def verify_schema(conn: psycopg.Connection) -> dict[str, Any]:
         c_def = str(row_c["def"]) if row_c and row_c.get("def") else ""
         docx_supported = "docx" in c_def
 
-    required_tables = {"documents", "document_versions", "chats", "messages", "reports"}
+        cur.execute(
+            """
+            select c.relname from pg_class as c
+            join pg_namespace as n on n.oid = c.relnamespace
+            join pg_policy as p on p.polrelid = c.oid
+            where n.nspname = 'public' and c.relrowsecurity and c.relforcerowsecurity
+              and p.polname = 'alpina_owner_scope' and not p.polpermissive
+            """
+        )
+        missing_session_rls = SESSION_TABLES - {row["relname"] for row in cur.fetchall()}
+        cur.execute(
+            "select 1 from pg_roles where rolname = 'alpina_app' and not rolsuper and not rolbypassrls"
+        )
+        web_role_rls = cur.fetchone() is not None
+
+    required_tables = {"documents", "document_versions", "chunks", "chunk_embeddings", "products"} | SESSION_TABLES
     missing_tables = required_tables - tables
 
     ready = (
@@ -124,6 +140,8 @@ def verify_schema(conn: psycopg.Connection) -> dict[str, Any]:
         and "user_id" in chats_cols
         and "session_id" in reports_cols
         and docx_supported
+        and not missing_session_rls
+        and web_role_rls
     )
 
     return {
@@ -133,6 +151,8 @@ def verify_schema(conn: psycopg.Connection) -> dict[str, Any]:
         "chats_columns": list(chats_cols),
         "reports_columns": list(reports_cols),
         "reports_docx_supported": docx_supported,
+        "missing_session_rls": sorted(missing_session_rls),
+        "web_role_rls": web_role_rls,
     }
 
 
@@ -155,7 +175,7 @@ def main() -> None:
             with connect() as conn:
                 status = verify_schema(conn)
             if status["ready"]:
-                logger.info("Esquema de base de datos verificado y 100%% operacional.")
+                logger.info("Esquema de base de datos verificado con el rol web.")
                 return
         except Exception as check_exc:
             logger.info("Verificación inicial con pool web no concluyente: %s", check_exc)
@@ -168,12 +188,14 @@ def main() -> None:
                 logger.info("Migraciones aplicadas: %s", ", ".join(applied))
             else:
                 logger.info("No hay migraciones pendientes.")
-            status_after = verify_schema(mig_conn)
-            if status_after["ready"]:
-                logger.info("Esquema verificado y 100%% operacional tras migraciones.")
-            else:
-                logger.error("El esquema presenta inconsistencias críticas tras migrar: %s", status_after)
-                sys.exit(1)
+
+        close_pool()
+        ready, status_after = check_database_ready()
+        if ready:
+            logger.info("Esquema verificado con el rol web tras las migraciones.")
+        else:
+            logger.error("El esquema presenta inconsistencias tras migrar: %s", status_after)
+            sys.exit(1)
     except Exception as exc:
         logger.error("Fallo crítico en el proceso de migración: %s", exc)
         sys.exit(1)

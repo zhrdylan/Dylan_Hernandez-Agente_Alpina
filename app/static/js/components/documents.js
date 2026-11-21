@@ -1,5 +1,6 @@
 import { api } from "../api.js";
 import { state } from "../state.js";
+import { escapeHtml } from "../utils/html.js";
 import { refreshIcons } from "../utils/icons.js";
 
 /**
@@ -9,16 +10,17 @@ export async function loadAndRenderDocuments() {
   const container = document.getElementById("document-list");
   if (!container) return;
 
-  container.innerHTML = `<div style="text-align: center; padding: 40px; color: var(--muted);"><i data-lucide="loader-2" class="ui-icon spin"></i> Cargando documentos oficiales...</div>`;
-  refreshIcons(container);
+  container.setAttribute("aria-busy", "true");
+  container.innerHTML = '<div class="document-item" aria-hidden="true"><div class="skeleton skeleton-line"></div></div>'.repeat(3);
 
   try {
     const documents = await api("/api/documents");
     state.documentsCache = documents;
     renderDocumentItems(documents, container);
   } catch (err) {
-    container.innerHTML = `<div style="text-align: center; padding: 40px; color: var(--red);"><i data-lucide="alert-circle" class="ui-icon"></i> Error al cargar documentos: ${err.message}</div>`;
-    refreshIcons(container);
+    container.textContent = "Error al cargar documentos. " + err.message;
+  } finally {
+    container.setAttribute("aria-busy", "false");
   }
 }
 
@@ -29,10 +31,8 @@ function renderDocumentItems(documents, container) {
     return;
   }
 
-  container.innerHTML = `
-    <div style="display: flex; flex-direction: column; gap: 10px; padding: 18px 24px; max-height: calc(85vh - 120px); overflow-y: auto;">
-      ${documents.map(d => `
-        <div style="background: #ffffff; border: 1px solid var(--line); border-radius: var(--radius-md); padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; gap: 12px;">
+  container.innerHTML = documents.map(d => `
+        <div class="document-item">
           <div style="display: flex; align-items: center; gap: 12px;">
             <div style="background: var(--blue-light); color: var(--blue); width: 36px; height: 36px; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
               <i data-lucide="file-text" class="ui-icon" style="width: 18px; height: 18px;"></i>
@@ -43,23 +43,19 @@ function renderDocumentItems(documents, container) {
                 ${escapeHtml(d.title)}
               </div>
               <div style="font-size: 0.78rem; color: var(--muted); margin-top: 4px;">
-                Categoría: <strong>${escapeHtml(d.category)}</strong> · ${d.page_count || 1} páginas · Vigente: ${d.vigente ? "Sí" : "No"}
+                Categoría: <strong>${escapeHtml(d.category)}</strong> · ${escapeHtml(d.page_count || 1)} páginas · Vigente: ${d.vigente ? "Sí" : "No"}
               </div>
             </div>
           </div>
-          <button class="ghost-button view-page-btn" type="button" data-doc-id="${escapeHtml(d.id)}" data-page="1">
+          <button class="ghost-button view-page-btn" type="button">
             <i data-lucide="eye" class="ui-icon"></i>
             <span>Ver página 1</span>
           </button>
         </div>
-      `).join("")}
-    </div>
-  `;
+  `).join("");
 
-  container.querySelectorAll(".view-page-btn").forEach(btn => {
-    btn.onclick = () => {
-      openPagePreview(btn.dataset.docId, parseInt(btn.dataset.page || "1", 10));
-    };
+  container.querySelectorAll(".view-page-btn").forEach((btn, index) => {
+    btn.onclick = () => openPagePreview(documents[index].id, 1);
   });
 
   refreshIcons(container);
@@ -68,7 +64,6 @@ function renderDocumentItems(documents, container) {
 let currentDocId = null;
 let currentPage = 1;
 let currentTotalPages = 1;
-let currentQuote = null;
 
 export function setupPreviewControls() {
   const prevBtn = document.getElementById("preview-prev-btn");
@@ -77,24 +72,23 @@ export function setupPreviewControls() {
   if (prevBtn) {
     prevBtn.onclick = () => {
       if (currentPage > 1) {
-        openPagePreview(currentDocId, currentPage - 1, currentQuote);
+        openPagePreview(currentDocId, currentPage - 1);
       }
     };
   }
   if (nextBtn) {
     nextBtn.onclick = () => {
       if (currentPage < currentTotalPages) {
-        openPagePreview(currentDocId, currentPage + 1, currentQuote);
+        openPagePreview(currentDocId, currentPage + 1);
       }
     };
   }
 }
 
-export function openPagePreview(docId, pageNumber, quote = null) {
+function openPagePreview(docId, pageNumber) {
   const modal = document.getElementById("preview-modal");
   const imgEl = document.getElementById("preview-img");
   const titleEl = document.getElementById("preview-title");
-  const quoteEl = document.getElementById("preview-quote");
   const prevBtn = document.getElementById("preview-prev-btn");
   const nextBtn = document.getElementById("preview-next-btn");
   const indicator = document.getElementById("preview-page-indicator");
@@ -104,7 +98,6 @@ export function openPagePreview(docId, pageNumber, quote = null) {
 
   currentDocId = docId;
   currentPage = pageNumber;
-  currentQuote = quote;
 
   // Resolver metadatos del documento desde el caché
   const docInfo = (state.documentsCache || []).find(d => d.id === docId);
@@ -123,25 +116,9 @@ export function openPagePreview(docId, pageNumber, quote = null) {
     fullPdfBtn.style.display = docId.toUpperCase().startsWith("SKU-") ? "none" : "inline-flex";
   }
 
-  if (quoteEl) {
-    if (quote) {
-      quoteEl.innerHTML = `<strong>Cita citada:</strong><br>"${escapeHtml(quote)}"`;
-      quoteEl.style.display = "block";
-    } else {
-      quoteEl.style.display = "none";
-    }
-  }
-
-  const quoteParam = quote ? `?quote=${encodeURIComponent(quote)}` : "";
-  imgEl.src = `/api/documents/${encodeURIComponent(docId)}/pages/${pageNumber}${quoteParam}`;
+  imgEl.src = `/api/documents/${encodeURIComponent(docId)}/pages/${pageNumber}`;
 
   modal.classList.add("open");
   modal.setAttribute("aria-hidden", "false");
   refreshIcons(modal);
-}
-
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = String(text || "");
-  return div.innerHTML;
 }

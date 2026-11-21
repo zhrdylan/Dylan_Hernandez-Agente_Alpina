@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 from functools import lru_cache
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from threading import Lock
 from typing import Optional
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
@@ -10,6 +14,7 @@ from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from app.config import DATA_DIR, settings
 
 logger = logging.getLogger(__name__)
+_dev_key_lock = Lock()
 
 
 class CryptoError(RuntimeError):
@@ -28,49 +33,72 @@ class DecryptionError(CryptoError):
 
 
 @lru_cache(maxsize=1)
-def get_fernet() -> MultiFernet:
-    """Obtiene e inicializa la instancia Fernet / MultiFernet con soporte para rotación de claves."""
-    raw_keys = (settings.chat_encryption_key or "").strip()
-    if raw_keys:
-        keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
-        fernets = []
-        for k in keys:
-            try:
-                k_bytes = k.encode("utf-8") if isinstance(k, str) else k
-                fernets.append(Fernet(k_bytes))
-            except Exception as exc:
-                raise CryptoError(
-                    f"Una de las claves en CHAT_ENCRYPTION_KEY no es válida para Fernet: {exc}"
-                ) from exc
-        if fernets:
-            return MultiFernet(fernets)
-
-    if settings.app_env.lower() == "production":
-        raise CryptoError(
-            "CHAT_ENCRYPTION_KEY es obligatoria en entornos de producción para asegurar los datos en reposo."
-        )
-
-    # Entorno de desarrollo / pruebas: persistir clave dedicada en disco para consistencia entre reinicios
-    key_path = DATA_DIR / ".dev_chat_key"
-    if key_path.is_file():
-        try:
-            persisted = key_path.read_text(encoding="utf-8").strip()
-            return MultiFernet([Fernet(persisted.encode("utf-8"))])
-        except Exception:
-            pass
-
-    new_key = Fernet.generate_key().decode("utf-8")
+def _configured_fernet(raw_keys: str) -> MultiFernet:
     try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        key_path.write_text(new_key, encoding="utf-8")
-        logger.warning(
-            "No se especificó CHAT_ENCRYPTION_KEY en .env. Se generó y guardó una clave de desarrollo en %s",
-            key_path,
-        )
-    except Exception as exc:
-        logger.warning("No se pudo persistir la clave de desarrollo en disco: %s", exc)
+        return MultiFernet([Fernet(key.strip().encode("ascii")) for key in raw_keys.split(",")])
+    except ValueError as exc:
+        raise CryptoError("CHAT_ENCRYPTION_KEY contiene una clave Fernet inválida.") from exc
 
-    return MultiFernet([Fernet(new_key.encode("utf-8"))])
+
+def _restrict_key_file(path: Path) -> None:
+    if path.is_symlink():
+        raise CryptoError("El archivo de clave de desarrollo debe ser un archivo local regular.")
+    if os.name != "nt":
+        path.chmod(0o600)
+        return
+
+    # Windows restringe el acceso mediante la DACL del archivo.
+    script = """
+    $ErrorActionPreference = 'Stop'
+    $path = $env:ALPINA_DEV_KEY_PATH
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $acl = [System.Security.AccessControl.FileSecurity]::new()
+    $acl.SetSecurityDescriptorSddlForm("D:P(A;;FA;;;$sid)", [System.Security.AccessControl.AccessControlSections]::Access)
+    [System.IO.File]::SetAccessControl($path, $acl)
+    """
+    subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        env={**os.environ, "ALPINA_DEV_KEY_PATH": str(path)},
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        check=True, capture_output=True, timeout=15,
+    )
+
+
+def _create_dev_key(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=path.parent, delete=False) as key_file:
+        temporary_path = Path(key_file.name)
+    try:
+        _restrict_key_file(temporary_path)
+        temporary_path.write_bytes(Fernet.generate_key())
+        os.link(temporary_path, path)
+    except FileExistsError:
+        # Otro proceso ya publicó su clave completa.
+        pass
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+@lru_cache(maxsize=1)
+def _dev_fernet(key_path: Path) -> MultiFernet:
+    try:
+        if not key_path.exists() and not key_path.is_symlink():
+            _create_dev_key(key_path)
+        _restrict_key_file(key_path)
+        return MultiFernet([Fernet(key_path.read_bytes().strip())])
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise CryptoError("No se pudo leer o proteger la clave de desarrollo.") from exc
+
+
+def get_fernet() -> MultiFernet:
+    """Usa la primera clave configurada para cifrar y las restantes durante la rotación."""
+    raw_keys = settings.chat_encryption_key.strip()
+    if raw_keys:
+        return _configured_fernet(raw_keys)
+    if settings.is_production:
+        raise CryptoError("CHAT_ENCRYPTION_KEY es obligatoria en producción.")
+    with _dev_key_lock:
+        return _dev_fernet(DATA_DIR / ".dev_chat_key")
 
 
 def encrypt_text(plain: Optional[str]) -> str:
@@ -93,32 +121,16 @@ def encrypt_text(plain: Optional[str]) -> str:
 
 
 def decrypt_text(cipher: Optional[str]) -> str:
-    """Descifra un token Fernet devolviendo el texto en plano original.
-    
-    Si el texto no es un token Fernet (datos planos heredados), se retorna tal cual.
-    Si es un token Fernet manipulado o corrupto, lanza DecryptionError.
-    """
-    if cipher is None:
-        return ""
-    text = str(cipher)
-    if not text:
+    """Descifra únicamente tokens Fernet autenticados. Los valores vacíos se conservan."""
+    if cipher is None or cipher == "":
         return ""
 
-    # Detección estricta de token Fernet (prefijo estándar base64 'gAAAAA')
-    if text.startswith("gAAAAA"):
-        try:
-            fernet = get_fernet()
-            plain_bytes = fernet.decrypt(text.encode("utf-8"))
-            return plain_bytes.decode("utf-8")
-        except InvalidToken as exc:
-            logger.error("Token Fernet inválido o HMAC fallido: %s", exc)
-            raise DecryptionError("Token cifrado corrupto o con firma inválida.") from exc
-        except Exception as exc:
-            logger.error("Error inesperado al descifrar token Fernet: %s", exc)
-            raise DecryptionError(f"Error al descifrar token: {exc}") from exc
-
-    # Texto en plano heredado (migración retroactiva segura)
-    return text
+    try:
+        return get_fernet().decrypt(str(cipher).encode("utf-8")).decode("utf-8")
+    except InvalidToken as exc:
+        raise DecryptionError("El valor almacenado no es un token cifrado válido.") from exc
+    except (CryptoError, UnicodeError) as exc:
+        raise DecryptionError("No se pudo descifrar el contenido almacenado.") from exc
 
 
 def rotate_encrypted_text(cipher: Optional[str]) -> str:

@@ -1,19 +1,25 @@
 import { api } from "./api.js";
-import { state, setState } from "./state.js";
+import { state } from "./state.js";
 import { storage } from "./storage.js";
-import { renderMessages, showTypingIndicator, hideTypingIndicator } from "./components/chat.js";
+import { renderChatLoading, renderMessages, showTypingIndicator, hideTypingIndicator } from "./components/chat.js";
 import { loadAndRenderCatalog } from "./components/catalog.js";
-import { loadAndRenderDocuments, openPagePreview, setupPreviewControls } from "./components/documents.js";
-import { openPdfPreviewModal, closeDossierModal } from "./components/dossier.js";
+import { loadAndRenderDocuments, setupPreviewControls } from "./components/documents.js";
+import { closeDossierModal } from "./components/dossier.js";
 import { initCitationDrawer } from "./components/inspector.js";
 import { refreshIcons } from "./utils/icons.js";
+
+const mobileLayout = window.matchMedia("(max-width: 820px)");
+const selectedChatIds = new Set();
+const modalOpeners = new WeakMap();
+let selectingChats = false;
+let isSavingChats = false;
+let chatSelection = 0;
+let noticeTimer;
 
 /**
  * Punto de entrada principal (ES Module) del Agente Alpina.
  */
 document.addEventListener("DOMContentLoaded", async () => {
-  storage.cookies.getDeviceId();
-  storage.cookies.getSessionId();
   initModals();
   initComposer();
   initSidebar();
@@ -22,7 +28,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   refreshIcons();
 
-  await checkHealthAndStats();
+  checkHealthAndStats();
   await loadChats();
 });
 
@@ -39,85 +45,183 @@ async function checkHealthAndStats() {
       } else {
         statusEl.innerHTML = `<i data-lucide="loader-2" class="ui-icon spin" style="width:13px; height:13px;"></i> <span>Iniciando...</span>`;
       }
+      statusEl.title = statusEl.textContent.trim();
       refreshIcons(statusEl);
     }
 
     const stats = await api("/api/stats");
     if (statsEl) {
-      statsEl.innerHTML = `<i data-lucide="layers" class="ui-icon" style="width:13px; height:13px; margin-right:4px;"></i> <span>${stats.documents || 0} docs · ${stats.products || 0} productos · ${stats.chunks || 0} chunks</span>`;
+      statsEl.innerHTML = '<i data-lucide="layers" class="ui-icon"></i> <span></span>';
+      statsEl.querySelector("span").textContent = `${stats.documents || 0} documentos · ${stats.products || 0} productos`;
       refreshIcons(statsEl);
     }
   } catch (err) {
     if (statusEl) {
       statusEl.innerHTML = `<i data-lucide="alert-triangle" class="ui-icon" style="color:var(--red); width:13px; height:13px;"></i> <span>Error de conexión</span>`;
+      statusEl.title = "Error de conexión";
       refreshIcons(statusEl);
     }
   }
 }
 
 async function loadChats() {
-  try {
-    const chats = await api("/api/chats");
-    state.chats = chats;
-    renderChatList(chats);
+  state.isLoadingChat = true;
+  renderChatLoading();
+  updateChatControls();
 
-    if (chats.length > 0) {
-      const savedChatId = storage.local.getActiveChatId();
-      const targetChat = chats.find(c => c.id === savedChatId) || chats[0];
-      await selectChat(targetChat.id);
-    } else {
-      state.activeChatId = null;
-      storage.local.setActiveChatId(null);
-      state.messages = [];
-      renderMessages([], handleAsk);
-    }
+  try {
+    state.chats = await api("/api/chats");
   } catch (err) {
     console.error("Error al cargar chats:", err);
-  }
-}
-
-function renderChatList(chats) {
-  const listEl = document.getElementById("chat-list");
-  if (!listEl) return;
-
-  if (!chats || chats.length === 0) {
-    listEl.innerHTML = `<div style="color: var(--sidebar-muted); font-size: 0.78rem; padding: 8px;"><i data-lucide="message-square-dashed" class="ui-icon" style="width:14px;height:14px;margin-right:4px;"></i> Sin chats aún.</div>`;
-    refreshIcons(listEl);
+    const list = document.getElementById("chat-list");
+    setChatListMessage(list, "No se pudo cargar el historial.");
+    list.setAttribute("aria-busy", "false");
+    renderMessages(state.messages, handleAsk);
+    state.isLoadingChat = false;
+    updateChatControls();
     return;
   }
 
-  listEl.innerHTML = chats.map(c => `
-    <button class="chat-item ${c.id === state.activeChatId ? "active" : ""}" type="button" data-chat-id="${c.id}" title="${escapeHtml(c.title || 'Nuevo chat')}">
-      <i data-lucide="message-square" class="ui-icon chat-item-icon"></i>
-      <span class="chat-item-title">${escapeHtml(c.title || "Nuevo chat")}</span>
-    </button>
-  `).join("");
+  const savedChatId = storage.local.getActiveChatId();
+  const chat = state.chats.find(chat => chat.id === savedChatId) || state.chats[0];
+  if (chat) await selectChat(chat.id);
+  else showNewChat();
+}
 
-  listEl.querySelectorAll(".chat-item").forEach(btn => {
-    btn.onclick = () => selectChat(btn.dataset.chatId);
-  });
+function setChatListMessage(list, text) {
+  const message = document.createElement("p");
+  message.className = "chat-list-message";
+  message.textContent = text;
+  list.replaceChildren(message);
+}
 
-  refreshIcons(listEl);
+function createChatItem(chat) {
+  const title = chat.title || "Nuevo chat";
+  const item = document.createElement(selectingChats ? "label" : "button");
+  item.className = "chat-item";
+  item.dataset.chatId = chat.id;
+  item.title = title;
+
+  if (selectingChats) {
+    item.classList.add("chat-selection-item");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = selectedChatIds.has(chat.id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) selectedChatIds.add(chat.id);
+      else selectedChatIds.delete(chat.id);
+      updateChatControls();
+    });
+    item.appendChild(checkbox);
+  } else {
+    item.type = "button";
+    const current = chat.id === state.activeChatId;
+    item.classList.toggle("active", current);
+    if (current) item.setAttribute("aria-current", "true");
+    item.innerHTML = '<i data-lucide="message-square" class="ui-icon chat-item-icon"></i>';
+    item.addEventListener("click", () => {
+      setSidebarOpen(false);
+      selectChat(chat.id);
+    });
+  }
+
+  const label = document.createElement("span");
+  label.className = "chat-item-title";
+  label.textContent = title;
+  item.appendChild(label);
+  return item;
+}
+
+function renderChatList() {
+  const list = document.getElementById("chat-list");
+  const focusedChat = document.activeElement?.closest("[data-chat-id]")?.dataset.chatId;
+  if (state.chats.length) list.replaceChildren(...state.chats.map(createChatItem));
+  else setChatListMessage(list, "Sin chats aún.");
+  refreshIcons(list);
+  list.setAttribute("aria-busy", "false");
+
+  if (focusedChat) {
+    const item = list.querySelector(`[data-chat-id="${CSS.escape(focusedChat)}"]`);
+    (item?.querySelector("input") || item)?.focus({ preventScroll: true });
+  }
+}
+
+function chatIsBusy() {
+  return state.isSending || state.isLoadingChat || isSavingChats;
+}
+
+function updateChatControls() {
+  const busy = chatIsBusy();
+  const submitBtn = document.getElementById("send-button");
+  const selectBtn = document.getElementById("select-chats");
+  const deleteSelectedBtn = document.getElementById("delete-selected-chats");
+
+  submitBtn.disabled = busy;
+  document.getElementById("new-chat").disabled = busy;
+  document.getElementById("delete-chat").disabled = busy || !state.activeChatId;
+  selectBtn.disabled = busy || (!selectingChats && !state.chats.length);
+  selectBtn.textContent = selectingChats ? "Cancelar" : "Seleccionar";
+
+  const count = selectedChatIds.size;
+  deleteSelectedBtn.hidden = !selectingChats;
+  deleteSelectedBtn.disabled = busy || !count;
+  deleteSelectedBtn.querySelector("span").textContent = count
+    ? `Eliminar ${count} ${count === 1 ? "chat" : "chats"}`
+    : "Eliminar selección";
+
+  document.querySelectorAll("#chat-list input").forEach(input => { input.disabled = busy; });
+  document.querySelectorAll("#chat-list button").forEach(button => { button.disabled = isSavingChats; });
+}
+
+function updateChatTitle() {
+  const titleEl = document.getElementById("chat-title");
+  const chat = state.chats.find(chat => chat.id === state.activeChatId);
+  titleEl.textContent = chat?.title || "Nuevo chat";
+  titleEl.title = titleEl.textContent;
+}
+
+function showNewChat() {
+  state.activeChatId = null;
+  state.isLoadingChat = false;
+  state.messages = [];
+  storage.local.setActiveChatId(null);
+  updateChatTitle();
+  renderMessages([], handleAsk);
+  renderChatList();
+  updateChatControls();
 }
 
 async function selectChat(chatId) {
+  const selection = ++chatSelection;
   state.activeChatId = chatId;
+  state.isLoadingChat = true;
+  state.messages = [];
   storage.local.setActiveChatId(chatId);
-  renderChatList(state.chats);
-
-  const titleEl = document.getElementById("chat-title");
-  const activeChat = state.chats.find(c => c.id === chatId);
-  if (titleEl && activeChat) titleEl.textContent = activeChat.title || "Chat activo";
+  updateChatTitle();
+  renderChatLoading();
+  renderChatList();
+  updateChatControls();
 
   try {
     const messages = await api(`/api/chats/${chatId}/messages`);
     // Descartar si el usuario cambió a otro chat antes de que este fetch terminara (R11)
-    if (state.activeChatId !== chatId) return;
+    if (state.activeChatId !== chatId || selection !== chatSelection) return;
     state.messages = messages;
     renderMessages(messages, handleAsk);
   } catch (err) {
-    if (state.activeChatId === chatId) {
+    if (selection === chatSelection) {
       console.error("Error al obtener mensajes:", err);
+      const container = document.getElementById("messages");
+      const message = document.createElement("p");
+      message.className = "message-load-error";
+      message.textContent = "No se pudo cargar esta conversación.";
+      container.replaceChildren(message);
+      container.setAttribute("aria-busy", "false");
+    }
+  } finally {
+    if (selection === chatSelection) {
+      state.isLoadingChat = false;
+      updateChatControls();
     }
   }
 }
@@ -138,42 +242,43 @@ function initComposer() {
 
   form.onsubmit = async (e) => {
     e.preventDefault();
-    const content = input.value.trim();
-    if (!content || state.isSending) return;
+    const content = input.value.replace(/^[ \r\n]+|[ \r\n]+$/g, "");
+    if (!content.trim() || chatIsBusy()) return;
     input.value = "";
     storage.session.clearComposerDraft();
     await handleAsk(content);
   };
 
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
-      form.dispatchEvent(new Event("submit"));
+      form.requestSubmit();
     }
   });
 }
 
 async function handleAsk(content) {
-  if (!content || state.isSending) return;
+  if (!content || chatIsBusy()) return;
   state.isSending = true;
   const input = document.getElementById("message-input");
-  const submitBtn = document.querySelector("#composer button[type='submit']");
-  if (submitBtn) submitBtn.disabled = true;
+  updateChatControls();
+  let targetChatId = state.activeChatId;
+  let userMsg;
 
   try {
     // Si no hay chat activo, crear uno dentro del bloque protegido (F16)
-    if (!state.activeChatId) {
+    if (!targetChatId) {
       const newChat = await api("/api/chats", { method: "POST", body: { title: content.slice(0, 40) } });
       state.activeChatId = newChat.id;
+      targetChatId = newChat.id;
       storage.local.setActiveChatId(newChat.id);
       state.chats.unshift(newChat);
-      renderChatList(state.chats);
+      updateChatTitle();
+      renderChatList();
     }
 
-    const targetChatId = state.activeChatId;
-
     // Agregar mensaje de usuario optimistamente
-    const userMsg = { role: "user", content, created_at: new Date().toISOString() };
+    userMsg = { role: "user", content, created_at: new Date().toISOString() };
     state.messages.push(userMsg);
     renderMessages(state.messages, handleAsk);
     showTypingIndicator();
@@ -184,77 +289,176 @@ async function handleAsk(content) {
     });
 
     hideTypingIndicator();
+    Object.assign(userMsg, res.user_message || {});
     const assistantMsg = {
+      ...res.assistant_message,
       role: "assistant",
       content: res.answer,
       citations: res.citations || [],
       metadata: res.metadata || {},
       generated_report: res.generated_report || res.metadata?.generated_report || null,
-      created_at: new Date().toISOString(),
     };
-    if (assistantMsg.generated_report && !assistantMsg.metadata.generated_report) {
-      assistantMsg.metadata.generated_report = assistantMsg.generated_report;
-    }
-
     // Vincular respuesta a la conversación activa para evitar fuga de mensajes si el usuario cambió de chat (F16)
     if (state.activeChatId === targetChatId) {
-      state.messages.push(assistantMsg);
-      renderMessages(state.messages, handleAsk);
+      if (state.messages.includes(userMsg)) {
+        state.messages.push(assistantMsg);
+        renderMessages(state.messages, handleAsk);
+      } else {
+        await selectChat(targetChatId);
+      }
     }
 
-    // Actualizar lista de chats
-    const chats = await api("/api/chats");
-    state.chats = chats;
-    renderChatList(chats);
+    try {
+      state.chats = await api("/api/chats");
+      updateChatTitle();
+      renderChatList();
+    } catch (err) {
+      console.error("Error al actualizar conversaciones:", err);
+    }
   } catch (err) {
-    hideTypingIndicator();
-    // Conservar borrador tras fallo y limpiar mensaje optimista huérfano (R11)
-    if (input) {
-      input.value = content;
-      storage.session.setComposerDraft(content);
+    if (state.activeChatId === targetChatId) {
+      if (input && !input.value) {
+        input.value = content;
+        storage.session.setComposerDraft(content);
+      }
+      const failedMessage = state.messages.indexOf(userMsg);
+      if (failedMessage !== -1) {
+        state.messages.splice(failedMessage, 1);
+        renderMessages(state.messages, handleAsk);
+      }
+      alert(`Error del agente: ${err.message}`);
     }
-    if (state.messages.length > 0 && state.messages[state.messages.length - 1].role === "user") {
-      state.messages.pop();
-      renderMessages(state.messages, handleAsk);
-    }
-    alert(`Error del agente: ${err.message}`);
   } finally {
+    hideTypingIndicator();
     state.isSending = false;
-    if (submitBtn) submitBtn.disabled = false;
+    updateChatControls();
+  }
+}
+
+function showChatNotice(message, { error = false, pending = false } = {}) {
+  const notice = document.getElementById("chat-notice");
+  clearTimeout(noticeTimer);
+  notice.textContent = message;
+  notice.classList.toggle("error", error);
+  if (!pending) {
+    noticeTimer = setTimeout(() => { notice.textContent = ""; }, 6500);
+  }
+}
+
+async function deleteChats(chatIds, trigger) {
+  if (chatIsBusy() || !chatIds.length) return;
+  const count = chatIds.length;
+  const description = count === 1 ? "este chat" : `estos ${count} chats`;
+  if (!window.confirm(`¿Deseas eliminar ${description}? Esta acción es permanente.`)) return;
+
+  const hadFocus = document.activeElement === trigger;
+  isSavingChats = true;
+  updateChatControls();
+  showChatNotice(count === 1 ? "Eliminando chat…" : `Eliminando ${count} chats…`, { pending: true });
+
+  const deleted = new Set();
+  for (const chatId of chatIds) {
+    try {
+      await api(`/api/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" });
+      deleted.add(chatId);
+    } catch (err) {
+      if (err.status === 404) deleted.add(chatId);
+    }
+  }
+
+  state.chats = state.chats.filter(chat => !deleted.has(chat.id));
+  for (const id of deleted) selectedChatIds.delete(id);
+  if (deleted.size && !selectedChatIds.size) selectingChats = false;
+
+  if (deleted.has(state.activeChatId)) {
+    if (state.chats[0]) await selectChat(state.chats[0].id);
+    else showNewChat();
+  } else {
+    renderChatList();
+  }
+
+  isSavingChats = false;
+  updateChatControls();
+  const failures = count - deleted.size;
+  const removed = deleted.size === 1 ? "Se eliminó 1 chat." : `Se eliminaron ${deleted.size} chats.`;
+  const failed = failures === 1 ? "No se pudo eliminar 1 chat." : `No se pudieron eliminar ${failures} chats.`;
+  showChatNotice([deleted.size && removed, failures && failed].filter(Boolean).join(" "), { error: failures > 0 });
+
+  if (hadFocus && document.activeElement === document.body) {
+    const nextControl = trigger.hidden ? document.getElementById("select-chats") : trigger;
+    const fallback = trigger.hidden ? "new-chat" : "message-input";
+    if (!nextControl.disabled) nextControl.focus();
+    else document.getElementById(fallback).focus();
+  }
+}
+
+function setSidebarOpen(open) {
+  const sidebar = document.getElementById("chat-sidebar");
+  const toggle = document.getElementById("sidebar-toggle");
+  const panel = document.querySelector(".chat-panel");
+  const wasOpen = sidebar.classList.contains("open");
+  const shouldOpen = open && mobileLayout.matches;
+  sidebar.classList.toggle("open", shouldOpen);
+  document.getElementById("sidebar-backdrop").classList.toggle("open", shouldOpen);
+  toggle.setAttribute("aria-expanded", String(shouldOpen));
+
+  if (shouldOpen) {
+    sidebar.inert = false;
+    document.getElementById("sidebar-close").focus();
+    panel.inert = true;
+  } else {
+    panel.inert = false;
+    if (wasOpen && mobileLayout.matches) toggle.focus();
+    sidebar.inert = mobileLayout.matches;
   }
 }
 
 function initSidebar() {
-  document.getElementById("new-chat")?.addEventListener("click", async () => {
-    const newChat = await api("/api/chats", { method: "POST", body: { title: "Nuevo chat" } });
-    state.chats.unshift(newChat);
-    renderChatList(state.chats);
-    await selectChat(newChat.id);
+  setSidebarOpen(false);
+  mobileLayout.addEventListener("change", () => setSidebarOpen(false));
+  document.getElementById("sidebar-toggle").addEventListener("click", () => setSidebarOpen(true));
+  document.getElementById("sidebar-close").addEventListener("click", () => setSidebarOpen(false));
+  document.getElementById("sidebar-backdrop").addEventListener("click", () => setSidebarOpen(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.getElementById("chat-sidebar").classList.contains("open")) {
+      setSidebarOpen(false);
+    }
   });
 
-  document.getElementById("clear-chats")?.addEventListener("click", async () => {
-    if (!confirm("¿Deseas vaciar todas las conversaciones? Esta acción no se puede deshacer.")) return;
-    await api("/api/chats", { method: "DELETE" });
-    storage.local.removeActiveChatId();
-    storage.session.clearComposerDraft();
-    state.chats = [];
-    state.messages = [];
-    state.activeChatId = null;
-    renderChatList([]);
-    renderMessages([], handleAsk);
+  document.getElementById("new-chat").addEventListener("click", async () => {
+    if (chatIsBusy()) return;
+    setSidebarOpen(false);
+    isSavingChats = true;
+    updateChatControls();
+    try {
+      const newChat = await api("/api/chats", { method: "POST", body: { title: "Nuevo chat" } });
+      state.chats.unshift(newChat);
+      await selectChat(newChat.id);
+    } catch (err) {
+      showChatNotice("No se pudo crear el chat.", { error: true });
+    } finally {
+      isSavingChats = false;
+      updateChatControls();
+    }
   });
 
-  document.getElementById("delete-chat")?.addEventListener("click", async () => {
-    if (!state.activeChatId) return;
-    if (!confirm("¿Deseas eliminar este chat?")) return;
-    const chatToDelete = state.activeChatId;
-    storage.local.removeActiveChatId();
-    state.activeChatId = null;
-    await api(`/api/chats/${chatToDelete}`, { method: "DELETE" });
-    await loadChats();
+  document.getElementById("delete-chat").addEventListener("click", (event) => {
+    if (state.activeChatId) deleteChats([state.activeChatId], event.currentTarget);
+  });
+
+  document.getElementById("select-chats").addEventListener("click", () => {
+    selectingChats = !selectingChats;
+    selectedChatIds.clear();
+    renderChatList();
+    updateChatControls();
+  });
+
+  document.getElementById("delete-selected-chats").addEventListener("click", (event) => {
+    deleteChats([...selectedChatIds], event.currentTarget);
   });
 
   document.getElementById("products-button")?.addEventListener("click", () => {
+    setSidebarOpen(false);
     openModal("catalog");
     loadAndRenderCatalog((productName) => {
       closeModal("catalog");
@@ -263,6 +467,7 @@ function initSidebar() {
   });
 
   document.getElementById("documents-button")?.addEventListener("click", () => {
+    setSidebarOpen(false);
     openModal("documents");
     loadAndRenderDocuments();
   });
@@ -276,7 +481,7 @@ function initModals() {
   // Cerrar al pulsar Escape
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
-      document.querySelectorAll(".modal.open").forEach(m => m.classList.remove("open"));
+      document.querySelectorAll(".modal.open").forEach(modal => closeModal(modal.id.replace(/-modal$/, "")));
     }
   });
 }
@@ -284,21 +489,22 @@ function initModals() {
 function openModal(id) {
   const modal = document.getElementById(`${id}-modal`);
   if (modal) {
+    modalOpeners.set(modal, document.activeElement);
     modal.classList.add("open");
     modal.setAttribute("aria-hidden", "false");
+    modal.querySelector(".modal-close")?.focus();
   }
 }
 
 function closeModal(id) {
+  if (id === "dossier") {
+    closeDossierModal();
+    return;
+  }
   const modal = document.getElementById(`${id}-modal`);
-  if (modal) {
+  if (modal?.classList.contains("open")) {
     modal.classList.remove("open");
     modal.setAttribute("aria-hidden", "true");
+    modalOpeners.get(modal)?.focus();
   }
-}
-
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = String(text || "");
-  return div.innerHTML;
 }

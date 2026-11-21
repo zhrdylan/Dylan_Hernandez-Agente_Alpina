@@ -6,7 +6,7 @@ from app.agent.validation import (
     validate_router_output,
     GUARDRAIL_RESPONSE,
 )
-from app.agent.prompts import ANSWER_SCHEMA, ANSWER_SYSTEM, GUARD_RAILS
+from app.agent.prompts import ANSWER_SCHEMA, ANSWER_SYSTEM
 
 
 def test_guardrails_off_domain_and_jailbreaks():
@@ -80,3 +80,12 @@ def test_greetings_and_code_of_a_product():
 ])
 def test_report_detector_recovers_topic(query, report_type, topic):
     assert detect_report_request(query) == {"report_type": report_type, "topic": topic}
+
+
+@pytest.mark.parametrize("query", [
+    "Quiero saber qué dice el PDF de la política de calidad",
+    "Dame un resumen del PDF de sostenibilidad",
+    "¿Qué es un archivo Word?",
+])
+def test_questions_about_formats_do_not_request_a_file(query):
+    assert detect_report_request(query) is None

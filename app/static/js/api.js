@@ -1,5 +1,3 @@
-import { storage } from "./storage.js";
-
 /**
  * Cliente HTTP estructurado para la API del Agente Alpina.
  */
@@ -25,7 +23,9 @@ export async function api(path, options = {}) {
     } catch {
       // Ignorar si no es JSON
     }
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.status = response.status;
+    throw error;
   }
 
   if (response.status === 204) return null;
@@ -39,16 +39,4 @@ export function formatCurrency(value) {
     currency: "COP",
     maximumFractionDigits: 0,
   }).format(value);
-}
-
-export function formatDate(value) {
-  if (!value) return "";
-  try {
-    return new Intl.DateTimeFormat("es-CO", {
-      dateStyle: "short",
-      timeStyle: "short",
-    }).format(new Date(value));
-  } catch {
-    return "";
-  }
 }

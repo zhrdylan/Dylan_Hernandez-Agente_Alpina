@@ -5,6 +5,7 @@ import pytest
 from app.retrieval.search import SearchFilters
 from app.products.search import product_row_to_result, search_products
 from app.agent.graph import _default_retrieve, retrieve_node
+from app.agent.validation import validate_citations
 
 
 def test_product_row_explicit_undeclared_fields():
@@ -65,6 +66,21 @@ def test_search_products_exact_sku_priority():
     # Verify exact SQL was executed with upper(id) or ean
     executed_sql = mock_cur.execute.call_args[0][0]
     assert "upper(id) = upper(%s)" in executed_sql or "id = %s" in executed_sql
+
+
+def test_product_citation_carries_type_and_official_url_for_unprefixed_id():
+    product = product_row_to_result({
+        "id": "ALP-001",
+        "name": "Producto de prueba",
+        "source_url": "https://alpina.com/producto-de-prueba",
+    })
+
+    citations, issues = validate_citations([{"source": 1}], [product])
+
+    assert issues == []
+    assert citations[0]["kind"] == "product"
+    assert citations[0]["document_id"] == "ALP-001"
+    assert citations[0]["source_url"] == product.source_url
 
 
 def test_default_retrieve_resilience_when_embeddings_fail():

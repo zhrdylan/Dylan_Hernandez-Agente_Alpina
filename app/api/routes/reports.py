@@ -1,26 +1,22 @@
 from __future__ import annotations
 
 import logging
-import re
-from pathlib import Path
-from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 
-from app.agent.prompts import ABSTENTION
 from app.api.deps import (
-    chat_uuid as validate_chat_uuid,
+    OwnedChat,
     get_current_session_id,
+    get_owned_chat,
     report_uuid as validate_report_uuid,
+    validate_uuid,
 )
 from app.api.schemas.reports import ReportRequest
-from app.config import REPORTS_DIR
-from app.core.crypto import decrypt_text
+from app.core.crypto import DecryptionError, decrypt_text
 from app.db.connection import connect
 from app.reports.service import create_report_record
-from app.reports.spec import ReportCitation
+from app.reports.generator import REPORT_MEDIA_TYPES, local_report_path, report_filename, report_storage_key
 from app.storage.r2 import R2Storage, R2StorageError
 
 router = APIRouter(tags=["reports"])
@@ -29,31 +25,24 @@ logger = logging.getLogger(__name__)
 
 @router.post("/api/chats/{chat_id}/reports")
 def create_report(
-    chat_id: str,
     payload: ReportRequest,
-    session_id: str = Depends(get_current_session_id),
+    chat: OwnedChat = Depends(get_owned_chat),
 ) -> dict:
-    """Genera un informe documental trazable en PDF, XLSX o DOCX para la última respuesta."""
-    chat_id_clean = validate_chat_uuid(chat_id)
+    """Genera un informe en PDF, XLSX o DOCX a partir de una respuesta del chat."""
+    chat_id_clean = chat.id
+    session_id = chat.session_id
+    message_id = validate_uuid(payload.message_id, "message_id") if payload.message_id else None
 
-    with connect() as conn:
+    with connect(session_id=session_id) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "select id, title from public.chats where id = %s and session_id = %s",
-                (chat_id_clean, session_id),
-            )
-            chat = cur.fetchone()
-            if not chat:
-                raise HTTPException(status_code=404, detail="Chat no encontrado.")
-
-            if payload.message_id:
+            if message_id:
                 cur.execute(
                     """
                     select id, content, citations, metadata, created_at
                     from public.messages
                     where id = %s and chat_id = %s and role = 'assistant'
                     """,
-                    (payload.message_id, chat_id_clean),
+                    (message_id, chat_id_clean),
                 )
                 assistant = cur.fetchone()
             else:
@@ -75,28 +64,25 @@ def create_report(
                     detail="La conversación aún no tiene una respuesta para reportar.",
                 )
 
-            cur.execute(
-                """
-                select content
-                from public.messages
-                where chat_id = %s and role = 'user' and created_at <= %s
-                order by created_at desc, id desc
-                limit 1
-                """,
-                (chat_id_clean, assistant["created_at"]),
-            )
-            user_message = cur.fetchone()
+            assistant_metadata = assistant.get("metadata")
+            if not isinstance(assistant_metadata, dict):
+                assistant_metadata = {}
+            user_provided = assistant_metadata.get("report_user_provided") is True
+            raw_question = assistant_metadata.get("report_question") or ""
+            if not raw_question and not user_provided:
+                cur.execute(
+                    """
+                    select content
+                    from public.messages
+                    where chat_id = %s and role = 'user' and created_at <= %s
+                    order by created_at desc, id desc
+                    limit 1
+                    """,
+                    (chat_id_clean, assistant["created_at"]),
+                )
+                raw_question = (cur.fetchone() or {}).get("content") or ""
 
-    citations: list[ReportCitation] = []
-    for citation in assistant.get("citations") or []:
-        try:
-            citations.append(ReportCitation(**citation))
-        except Exception:
-            continue
-
-    assistant_metadata = assistant.get("metadata")
-    if not isinstance(assistant_metadata, dict):
-        assistant_metadata = {}
+    citations = assistant.get("citations") or []
     abstained = bool(assistant_metadata.get("abstained"))
     verified = bool(assistant_metadata.get("verified"))
     verification_mode = assistant_metadata.get("verification_mode")
@@ -108,28 +94,20 @@ def create_report(
     ):
         verification_mode = "citas"
     verification_status = (
-        "Abstención"
-        if abstained
-        else (
-            "Citas OK"
-            if verification_mode == "citas"
-            else ("Verificado" if verified else "Sin verificar")
+        "Datos del usuario" if user_provided else (
+            "Citas OK" if verification_mode == "citas" else "Verificado"
         )
     )
 
-    raw_answer = assistant.get("content") or ABSTENTION
-    raw_question = (user_message or {}).get("content") or "Consulta documental"
-    clean_answer = decrypt_text(raw_answer)
-    clean_question = decrypt_text(raw_question)
-
-    # R04: Una abstención o respuesta sin respaldo documental NO debe publicar un archivo
-    if not verified or abstained or not citations or clean_answer.strip() == ABSTENTION:
+    if abstained or (not user_provided and (not verified or not citations)):
         raise HTTPException(
             status_code=400,
             detail="No se puede exportar un reporte para una respuesta con abstención o sin evidencia documental verificada.",
         )
 
     try:
+        clean_answer = decrypt_text(assistant.get("content"))
+        clean_question = decrypt_text(raw_question)
         return create_report_record(
             chat_id=chat_id_clean,
             question=clean_question,
@@ -140,7 +118,10 @@ def create_report(
             abstained=abstained,
             category=str(assistant_metadata.get("category") or "").lower(),
             session_id=session_id,
+            user_provided=user_provided,
         )
+    except DecryptionError as exc:
+        raise HTTPException(status_code=422, detail="No se pudo leer el contenido cifrado del informe.") from exc
     except ValueError as val_exc:
         raise HTTPException(status_code=400, detail=str(val_exc)) from val_exc
     except Exception as exc:
@@ -159,44 +140,30 @@ def download_report(
 ) -> Response:
     """Descarga o previsualización segura de un informe generado desde Cloudflare R2 o almacenamiento local."""
     report_id_clean = validate_report_uuid(report_id)
-    with connect() as conn:
+    with connect(session_id=session_id) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                select report_type, storage_key, metadata, status, title, session_id
+                select report_type, storage_key, status
                 from public.reports
-                where id = %s and (
-                    session_id = %s
-                    or (session_id is null and exists (
-                        select 1 from public.chats c where c.id = reports.chat_id and c.session_id = %s
-                    ))
-                )
+                where id = %s and session_id = %s
                 """,
-                (report_id_clean, session_id, session_id),
+                (report_id_clean, session_id),
             )
             report = cur.fetchone()
 
     if not report or report.get("status") != "generated":
         raise HTTPException(status_code=404, detail="Reporte no encontrado.")
 
-    metadata = report.get("metadata")
-    if not isinstance(metadata, dict):
-        metadata = {}
+    report_type = report["report_type"]
+    media_type = REPORT_MEDIA_TYPES.get(report_type)
+    if not media_type:
+        raise HTTPException(status_code=404, detail="Reporte no encontrado.")
 
-    report_type = str(report.get("report_type") or "pdf").lower()
-    if report_type == "docx":
-        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    elif report_type == "xlsx":
-        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    else:
-        media_type = "application/pdf"
-    filename = Path(str(metadata.get("filename") or "reporte")).name
-    disposition = "inline" if inline else "attachment"
-
-    # Prioridad 1: Si el archivo existe en el disco local del servidor, servirlo de inmediato (0ms latencia)
-    path = Path(str(metadata.get("path") or "")).resolve()
-    reports_root = REPORTS_DIR.resolve()
-    if path.is_file() and path.is_relative_to(reports_root):
+    filename = report_filename(report_id_clean, report_type)
+    disposition = "inline" if inline and report_type == "pdf" else "attachment"
+    path = local_report_path(report_id_clean, report_type)
+    if path and path.is_file():
         return FileResponse(
             path,
             media_type=media_type,
@@ -204,20 +171,15 @@ def download_report(
             content_disposition_type=disposition,
         )
 
-    # Prioridad 2: Fallback a Cloudflare R2 si no está en disco local (despliegues distribuidos/efímeros)
-    if metadata.get("storage") == "r2" or report.get("storage_key"):
-        r2_key = metadata.get("r2_key") or report.get("storage_key")
-        if r2_key and R2Storage.is_configured():
-            try:
-                data = R2Storage().get_bytes(str(r2_key))
-                return Response(
-                    content=data,
-                    media_type=media_type,
-                    headers={
-                        "Content-Disposition": f'{disposition}; filename="{filename}"'
-                    },
-                )
-            except R2StorageError:
-                pass
+    key = report_storage_key(report_id_clean, report_type)
+    if report.get("storage_key") == key and R2Storage.is_configured():
+        try:
+            return Response(
+                content=R2Storage().get_bytes(key),
+                media_type=media_type,
+                headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
+            )
+        except R2StorageError:
+            logger.warning("No se pudo leer la copia remota del informe %s", report_id_clean)
 
     raise HTTPException(status_code=404, detail="Archivo de reporte no encontrado.")

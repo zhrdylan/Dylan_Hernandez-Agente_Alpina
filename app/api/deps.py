@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import hashlib
-import secrets
+import re
 import uuid
+from dataclasses import dataclass
 from typing import Any
-from fastapi import HTTPException, Request
+
+from fastapi import Depends, HTTPException, Request
+from psycopg import Connection
+from psycopg.rows import dict_row
+
+from app.db.connection import connect
+
+SESSION_COOKIE = "alpina_session_id"
+_SESSION_TOKEN = re.compile(r"[A-Za-z0-9_.-]{8,64}")
 
 
 def validate_uuid(value: str, label: str = "id") -> str:
@@ -39,51 +48,45 @@ def derive_owner_id(session_token: str) -> str:
 
     Mantiene el secreto privado fuera del almacenamiento y de las respuestas JSON (R05).
     """
-    if not session_token:
-        return ""
-    clean = session_token.strip()
-    if clean.startswith("owner-") or clean.startswith("owner_"):
-        return clean
-    digest = hashlib.sha256(f"alpina_owner_salt_v1:{clean}".encode("utf-8")).hexdigest()[:32]
+    digest = hashlib.sha256(f"alpina_owner_salt_v1:{session_token.strip()}".encode("utf-8")).hexdigest()[:32]
     return f"owner_{digest}"
 
 
-def get_current_session_token(request: Request) -> str:
-    """Extrae o genera el secreto de sesión privado emitido por el servidor."""
-    token = getattr(request.state, "session_token", None)
-    if token:
-        return token
-
-    cookie_sess = request.cookies.get("alpina_session_id")
-    header_sess = request.headers.get("x-session-id")
-    raw = cookie_sess or header_sess
-    if raw and raw.strip().lower() not in {"default", "null", "undefined"}:
-        clean = "".join(c for c in raw.strip() if c.isalnum() or c in "-_.")[:64]
-        if len(clean) >= 8:
-            request.state.session_token = clean
-            return clean
-
-    new_token = f"sess-{secrets.token_urlsafe(24)}"
-    request.state.session_token = new_token
-    return new_token
+def validated_session_token(token: str | None) -> str | None:
+    candidate = (token or "").strip()
+    return candidate if _SESSION_TOKEN.fullmatch(candidate) and candidate.lower() != "undefined" else None
 
 
 def get_current_session_id(request: Request) -> str:
     """Obtiene el identificador de propietario interno para aislamiento y consultas en base de datos."""
     owner_id = getattr(request.state, "session_id", None)
-    if owner_id:
-        return owner_id
-    token = get_current_session_token(request)
-    owner = derive_owner_id(token)
-    request.state.session_id = owner
-    return owner
+    if not owner_id:
+        raise HTTPException(status_code=401, detail="No se pudo establecer la sesión.")
+    return owner_id
 
 
-def get_current_user_id(request: Request) -> str:
-    """Extrae y normaliza el identificador de usuario o sesión para compatibilidad retroactiva."""
-    return get_current_session_id(request)
+@dataclass(frozen=True)
+class OwnedChat:
+    id: str
+    session_id: str
+
+    def require(self, conn: Connection, *, lock: bool = False) -> dict:
+        query = "select title from public.chats where id = %s and session_id = %s"
+        if lock:
+            query += " for update"
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, (self.id, self.session_id))
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Chat no encontrado.")
+        return row
 
 
-def get_checkpointer(request: Request) -> Any:
-    """Obtiene el checkpointer de LangGraph si está disponible."""
-    return getattr(request.app.state, "checkpointer", None)
+def get_owned_chat(
+    chat_id: str = Depends(chat_uuid),
+    session_id: str = Depends(get_current_session_id),
+) -> OwnedChat:
+    chat = OwnedChat(chat_id, session_id)
+    with connect(session_id=session_id) as conn:
+        chat.require(conn)
+    return chat

@@ -6,25 +6,6 @@ export const state = {
   chats: [],
   messages: [],
   documentsCache: null,
-  productsCache: null,
-  activeDossier: null,
   isSending: false,
+  isLoadingChat: false,
 };
-
-export const listeners = new Set();
-
-export function setState(updates) {
-  Object.assign(state, updates);
-  for (const listener of listeners) {
-    try {
-      listener(state);
-    } catch (err) {
-      console.error("Error en listener de estado:", err);
-    }
-  }
-}
-
-export function subscribe(listener) {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}

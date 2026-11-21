@@ -5,32 +5,37 @@ import functools
 import logging
 import re
 import time
-from typing import Any, Callable
+from uuid import uuid4
+from typing import Annotated, Any, Callable
 
 logger = logging.getLogger(__name__)
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.channels import UntrackedValue
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
 from psycopg_pool import ConnectionPool
 
 from app.agent import prompts
+from app.agent.checkpoints import CheckpointPool, checkpoint_serializer, checkpoint_session, setup_checkpointer
 from app.agent.llm import chat_json
 from app.agent.progress import record_progress
+from app.agent.report_tools import REPORT_TOOLS, handle_report_error
 from app.agent.validation import (
     SCOPE_RESPONSE,
     classify_conversational_intent,
     detect_out_of_domain_or_jailbreak,
     detect_report_request,
-    resolve_document_ids,
+    provided_report_content,
     validate_answer_payload,
     validate_router_output,
 )
 from app.config import settings
-from app.db.connection import connect
+from app.db.connection import connect, verify_web_role
+from app.documents.catalog import resolve_document_ids
 from app.products.search import catalog_nutrition_answer, search_products
 from app.reports.financial import financial_statement_answer
-from app.reports.service import create_report_record
 from app.retrieval.coverage import needs_coverage
 from app.retrieval.search import SearchFilters, coverage_search
 
@@ -39,20 +44,23 @@ class AgentState(MessagesState):
     chat_id: str
     session_id: str | None
     category: str
-    search_query: str
+    search_query: Annotated[str, UntrackedValue(str)]
     filters: dict
     needs_documents: bool
-    results: list[dict]
+    results: Annotated[list[dict], UntrackedValue(list)]
     retrieval_failed: bool
-    answer: str
+    answer: Annotated[str, UntrackedValue(str)]
     citations: list[dict]
     abstained: bool
     verified: bool
     issues: list[str]
     timings: dict[str, float]
     generated_report: dict | None
-    report_request: dict | None
+    report_request: Annotated[dict | None, UntrackedValue(dict)]
+    report_tool_messages: Annotated[list, UntrackedValue(list)]
+    report_tool: str | None
     pending_report_type: str | None
+    provided_report_content: dict[str, str] | str | None
     last_verified: dict | None
 
 
@@ -150,25 +158,48 @@ def supervisor_node(state: AgentState) -> dict:
             "needs_documents": False,
             "answer": guardrail_answer,
             "pending_report_type": None,
+            "provided_report_content": None,
+            "last_verified": None,
             "issues": ["Solicitud fuera del alcance documental."],
             "timings": _timing(state, "supervisor", started),
         }
 
     report_request = detect_report_request(query)
+    provided = report_request.get("content", "") if report_request else provided_report_content(query)
+    previous = state.get("last_verified") or {}
+    if report_request and not report_request["topic"] and report_request.get("detailed") and previous.get("question"):
+        report_request = {**report_request, "topic": previous["question"]}
+    if provided and not report_request and state.get("pending_report_type"):
+        report_request = {"report_type": state["pending_report_type"], "topic": "", "content": provided}
+    if report_request and not report_request["topic"] and not provided:
+        saved_content = state.get("provided_report_content")
+        provided = saved_content.get("text", "") if isinstance(saved_content, dict) else (saved_content or "")
+    if provided:
+        if report_request:
+            report_request = {**report_request, "content": provided}
+        return {
+            "category": "general",
+            "needs_documents": False,
+            "answer": provided if report_request else prompts.REPORT_FORMAT_REQUEST,
+            "report_request": report_request,
+            "pending_report_type": None,
+            "provided_report_content": {"text": provided},
+            "last_verified": None,
+            "timings": _timing(state, "supervisor", started),
+        }
     if report_request and not report_request["topic"]:
-        previous = state.get("last_verified") or {}
         return {
             "category": previous.get("category") or "general",
             "needs_documents": False,
             "answer": previous.get("answer") or prompts.REPORT_TOPIC_REQUEST,
             "citations": previous.get("citations") or [],
-            "report_request": report_request if previous else None,
-            "pending_report_type": None if previous else report_request["report_type"],
+            "report_request": report_request if previous.get("citations") else None,
+            "pending_report_type": None if previous.get("citations") else report_request["report_type"],
             "timings": _timing(state, "supervisor", started),
         }
 
     intent = classify_conversational_intent(query)
-    if intent is not None:
+    if intent is not None and not report_request:
         return {
             "category": "general",
             "needs_documents": False,
@@ -191,7 +222,7 @@ def supervisor_node(state: AgentState) -> dict:
         r"\b(?:original|sin modificaciones)\b", subject, re.IGNORECASE,
     ):
         resolved_ids.append("N3")
-    filters: dict[str, Any] = {"coverage": needs_coverage(subject)}
+    filters: dict[str, Any] = {"coverage": bool(report_request) or needs_coverage(subject)}
     search_query = subject
     if resolved_ids:
         if set(resolved_ids) <= {"C4", "C5"} and financial_summary:
@@ -219,17 +250,21 @@ def supervisor_node(state: AgentState) -> dict:
                 schema=prompts.ROUTER_SCHEMA,
             )
             router = validate_router_output(payload, subject)
-        except Exception as exc:
+        except Exception:
+            logger.warning("No se pudo clasificar la consulta con Groq", exc_info=True)
             router = validate_router_output({}, subject)
-            issues.append(f"No se pudo clasificar la consulta con Groq: {exc}")
+            issues.append("No se pudo clasificar la consulta con el modelo.")
         category = router["category"]
         if category == "out_of_scope":
+            issues.append("Solicitud fuera del alcance documental.")
             return {
                 "category": "guardrail",
                 "needs_documents": False,
                 "answer": SCOPE_RESPONSE,
                 "pending_report_type": None,
-                "issues": ["Solicitud fuera del alcance documental."],
+                "provided_report_content": None,
+                "last_verified": None,
+                "issues": issues,
                 "timings": _timing(state, "supervisor", started),
             }
         search_query = router["search_query"] or subject
@@ -242,6 +277,7 @@ def supervisor_node(state: AgentState) -> dict:
         "needs_documents": True,
         "report_request": report_request,
         "pending_report_type": None,
+        "provided_report_content": None,
         "issues": issues,
         "timings": _timing(state, "supervisor", started),
     }
@@ -297,8 +333,19 @@ def answer_node(state: AgentState) -> dict:
         }
 
     category = state.get("category") or "general"
-    answer_results = results[:6] if (state.get("filters") or {}).get("coverage") else results[:4]
-    task = f"Prepara un informe documental sobre el tema indicado. {subject}" if report else subject
+    limit = 12 if report else (6 if (state.get("filters") or {}).get("coverage") else 4)
+    answer_results = results[:limit]
+    task = subject
+    if report:
+        task = (
+            f"Redacta el contenido completo para un informe sobre la solicitud: {subject}\n"
+            f"El archivo se generará en {prompts.REPORT_FORMAT_LABELS[report['report_type']]}. "
+            "Cubre cada aspecto que pidió el usuario y empieza con una síntesis. "
+            "Desarrolla los hallazgos por tema, con detalle concreto, alcance, fechas y unidades. "
+            "Presenta los datos comparables en tablas Markdown y explica su significado. "
+            "Incluye conclusiones, recomendaciones o pasos cuando los soliciten y estén sustentados. "
+            "Indica qué datos faltan para responder cualquier punto de la solicitud."
+        )
     if {"N2", "N3"}.issubset((state.get("filters") or {}).get("document_ids") or []) and FRONT_LABEL_RE.search(subject):
         task += "\nDistingue el texto original de la Resolución 810 y los cambios de la Resolución 2492."
     try:
@@ -308,23 +355,33 @@ def answer_node(state: AgentState) -> dict:
         elif category == "corporate" and FINANCIAL_RESULTS_RE.search(subject):
             direct_answer = financial_statement_answer(subject, answer_results)
 
-        payload = direct_answer or chat_json(
-            settings.groq_model_answer,
-            prompts.ANSWER_SYSTEM,
-            prompts.build_answer_user(
-                task, category, prompts.format_history(messages[:-1], limit=4), answer_results,
-            ),
-            max_tokens=1500,
-            fallback_model=settings.groq_model_fallback,
-            schema=prompts.ANSWER_SCHEMA,
-        )
+        payload = direct_answer
+        if report or not payload:
+            try:
+                payload = chat_json(
+                    settings.groq_model_answer,
+                    prompts.ANSWER_SYSTEM,
+                    prompts.build_answer_user(
+                        task, category, prompts.format_history(messages[:-1], limit=4), answer_results,
+                    ),
+                    max_tokens=3800 if report else 1500,
+                    fallback_model=settings.groq_model_fallback,
+                    fallback_max_tokens=3000 if report else 750,
+                    schema=prompts.ANSWER_SCHEMA,
+                )
+            except Exception:
+                if not direct_answer:
+                    raise
         validated = validate_answer_payload(payload, answer_results)
-    except Exception as exc:
+        if validated["abstained"] and direct_answer and payload is not direct_answer:
+            validated = validate_answer_payload(direct_answer, answer_results)
+    except Exception:
+        logger.exception("No se pudo preparar la respuesta documental")
         return {
             "answer": prompts.ANSWER_UNAVAILABLE,
             "citations": [],
             "abstained": True,
-            "issues": [*issues, f"Error al preparar la respuesta documental: {exc}"],
+            "issues": [*issues, "Error al preparar la respuesta documental."],
             "timings": _timing(state, "answer", started),
         }
 
@@ -346,20 +403,21 @@ def verify_node(state: AgentState) -> dict:
     abstained = bool(state.get("abstained"))
     issues = list(state.get("issues") or [])
     category = state.get("category") or "general"
+    explicit_req = state.get("report_request")
+    user_provided = bool(explicit_req and explicit_req.get("content"))
 
-    if not citations and not state.get("needs_documents", True):
+    if not user_provided and not citations and not state.get("needs_documents", True):
         return {
             "answer": answer,
             "citations": [],
             "abstained": False,
             "verified": False,
-            "last_verified": None,
             "generated_report": None,
             "messages": [AIMessage(content=answer)],
             "timings": _timing(state, "verify", started),
         }
 
-    if abstained or not citations or answer.strip() == prompts.ABSTENTION:
+    if abstained or (not user_provided and (not citations or answer.strip() == prompts.ABSTENTION)):
         final = answer if answer in {prompts.RETRIEVAL_UNAVAILABLE, prompts.ANSWER_UNAVAILABLE} else prompts.ABSTENTION
         return {
             "answer": final,
@@ -373,39 +431,48 @@ def verify_node(state: AgentState) -> dict:
         }
 
     query = _last_user_query(list(state.get("messages") or []))
-    explicit_req = state.get("report_request")
-    report = None
-    source_question = query
-    final_answer = answer
-    if explicit_req:
-        source_question = explicit_req["topic"] or (state.get("last_verified") or {}).get("question", "")
-        try:
-            report = create_report_record(
-                chat_id=state.get("chat_id") or "",
-                question=source_question,
-                answer=answer,
-                citations=citations,
-                report_type=explicit_req["report_type"],
-                verification_status="Verificado",
-                abstained=False,
-                category=category,
-                session_id=state.get("session_id"),
-            )
-        except Exception as exc:
-            logger.exception("No se pudo generar el informe solicitado")
-            issues.append(f"Error al generar el archivo ({type(exc).__name__}).")
-            final_answer = f"{answer}\n\n{prompts.REPORT_UNAVAILABLE}"
-
-    return {
-        "answer": final_answer,
-        "verified": True,
+    source_question = (
+        explicit_req["topic"] or (state.get("last_verified") or {}).get("question", "")
+        if explicit_req else query
+    )
+    update = {
+        "answer": answer,
+        "verified": not user_provided,
         "abstained": False,
         "citations": citations,
-        "issues": [*issues, "Citas documentales validadas."],
-        "last_verified": {"question": source_question, "answer": answer, "citations": citations, "category": category},
-        "generated_report": report,
-        "messages": [AIMessage(content=final_answer)],
+        "issues": issues if user_provided else [*issues, "Citas documentales validadas."],
+        "last_verified": (
+            None if user_provided else
+            {"question": source_question, "answer": answer, "citations": citations, "category": category}
+        ),
         "timings": _timing(state, "verify", started),
+    }
+    if explicit_req and (tool := REPORT_TOOLS.get(explicit_req["report_type"])):
+        update["report_tool_messages"] = [
+            AIMessage(content="", tool_calls=[{"name": tool.name, "args": {}, "id": str(uuid4())}])
+        ]
+    else:
+        update["messages"] = [AIMessage(content=answer)]
+    return update
+
+
+def finish_report_node(state: AgentState) -> dict:
+    messages = state.get("report_tool_messages") or []
+    result = messages[-1] if messages and isinstance(messages[-1], ToolMessage) else None
+    report = result.artifact if result and result.status == "success" else None
+    answer = state["answer"]
+    issues = list(state.get("issues") or [])
+    if not report:
+        answer = f"{answer}\n\n{prompts.REPORT_UNAVAILABLE}"
+        issues.append("La herramienta de informes no pudo guardar el archivo.")
+    record_progress(state.get("chat_id", ""), "report", "done" if report else "error")
+    return {
+        "answer": answer,
+        "messages": [AIMessage(content=answer)],
+        "issues": issues,
+        "generated_report": report,
+        "report_tool": result.name if result else None,
+        "report_tool_messages": [],
     }
 
 
@@ -419,6 +486,11 @@ def build_graph(
     builder.add_node("retrieve", lambda state: retrieve_node(state, retrieve_fn))
     builder.add_node("answer", answer_node)
     builder.add_node("verify", verify_node)
+    builder.add_node(
+        "report",
+        ToolNode(list(REPORT_TOOLS.values()), messages_key="report_tool_messages", handle_tool_errors=handle_report_error),
+    )
+    builder.add_node("finish_report", finish_report_node)
 
     builder.add_edge(START, "supervisor")
     builder.add_conditional_edges(
@@ -428,46 +500,56 @@ def build_graph(
     )
     builder.add_edge("retrieve", "answer")
     builder.add_edge("answer", "verify")
-    builder.add_edge("verify", END)
+    builder.add_conditional_edges("verify", lambda state: "report" if state.get("report_tool_messages") else END)
+    builder.add_edge("report", "finish_report")
+    builder.add_edge("finish_report", END)
     return builder.compile(checkpointer=checkpointer)
 
 
 def create_postgres_checkpointer() -> tuple[PostgresSaver, ConnectionPool]:
     if not settings.database_url:
         raise RuntimeError("DATABASE_URL no está configurada.")
-    pool = ConnectionPool(
+    pool = CheckpointPool(
         conninfo=settings.database_url,
         min_size=1,
         max_size=5,
         kwargs={"autocommit": True, "prepare_threshold": 0},
+        open=False,
     )
-    checkpointer = PostgresSaver(pool)
-    checkpointer.setup()
+    try:
+        pool.open(wait=True, timeout=20)
+        with pool.connection() as conn:
+            verify_web_role(conn)
+        checkpointer = PostgresSaver(pool, serde=checkpoint_serializer())
+        setup_checkpointer(checkpointer, pool)
+    except Exception:
+        pool.close()
+        raise
     return checkpointer, pool
 
 
 def ask(graph: Any, question: str, chat_id: str, *, session_id: str | None = None) -> dict:
     config = {"configurable": {"thread_id": chat_id}}
-    return graph.invoke(
-        {
-            "messages": [HumanMessage(content=question)],
-            "chat_id": chat_id,
-            "session_id": session_id,
-            "category": "",
-            "search_query": "",
-            "filters": {},
-            "needs_documents": True,
-            "results": [],
-            "retrieval_failed": False,
-            "answer": "",
-            "citations": [],
-            "abstained": False,
-            "verified": False,
-            "generated_report": None,
-            "report_request": None,
-            "issues": [],
-            "timings": {},
-        },
-        config=config,
-        durability="exit",
-    )
+    state = {
+        "messages": [HumanMessage(content=question)],
+        "chat_id": chat_id,
+        "session_id": session_id,
+        "category": "",
+        "search_query": "",
+        "filters": {},
+        "needs_documents": True,
+        "results": [],
+        "retrieval_failed": False,
+        "answer": "",
+        "citations": [],
+        "abstained": False,
+        "verified": False,
+        "generated_report": None,
+        "report_request": None,
+        "report_tool_messages": [],
+        "report_tool": None,
+        "issues": [],
+        "timings": {},
+    }
+    with checkpoint_session(session_id):
+        return graph.invoke(state, config=config, durability="exit")

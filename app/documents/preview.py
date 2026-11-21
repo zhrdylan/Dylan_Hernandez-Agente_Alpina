@@ -3,21 +3,30 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import re
 import textwrap
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any
 
 import pdfplumber
 import pypdfium2 as pdfium
 from PIL import Image, ImageDraw, ImageFont
+from PIL.PngImagePlugin import PngInfo
+from psycopg.rows import dict_row
 
 from app.config import BASE_DIR
 from app.db.connection import connect
+from app.documents.catalog import DOCUMENT_ID_RE, OFFICIAL_DOCUMENT_TITLES
+from app.storage.r2 import R2Storage
 
 LOCK_PATH = BASE_DIR / "data" / "manifest.lock.json"
 CACHE_DIR = BASE_DIR / "data" / "cache" / "pages"
 DOCUMENT_CACHE_DIR = BASE_DIR / "data" / "cache" / "documents"
 PREVIEW_DPI = 150
+_VERSION = re.compile(r"[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*")
+logger = logging.getLogger(__name__)
 
 
 class PagePreviewError(RuntimeError):
@@ -31,14 +40,35 @@ def _load_lock() -> dict:
     return payload.get("documents") or {}
 
 
-def _r2_pdf_path(document_id: str, version: str | None = None) -> Path | None:
-    try:
-        from app.storage.r2 import R2Storage, R2StorageError
+def _pdf_cache_path(document_id: str, version: str | None) -> Path:
+    if not DOCUMENT_ID_RE.fullmatch(document_id):
+        raise PagePreviewError("Documento no válido para vista previa.")
+    if version is not None and (len(version) > 80 or not _VERSION.fullmatch(version)):
+        raise PagePreviewError("Versión no válida para vista previa.")
+    v_tag = f"_v{version}" if version else ""
+    return DOCUMENT_CACHE_DIR / f"{document_id}{v_tag}.pdf"
 
+
+def _write_cache(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=path.parent, delete=False) as temp:
+        temporary_path = Path(temp.name)
+        try:
+            temp.write(payload)
+            temp.close()
+            temporary_path.replace(path)
+        finally:
+            temp.close()
+            temporary_path.unlink(missing_ok=True)
+
+
+def _r2_pdf_path(document_id: str, version: str | None = None) -> Path | None:
+    target = _pdf_cache_path(document_id, version)
+    try:
         if not R2Storage.is_configured():
             return None
         with connect() as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
                 if version:
                     cur.execute(
                         """
@@ -61,41 +91,17 @@ def _r2_pdf_path(document_id: str, version: str | None = None) -> Path | None:
                         (document_id,),
                     )
                 row = cur.fetchone()
-        if not row or not row[0]:
+        if not row or not row.get("storage_key"):
             return None
-        v_tag = f"_v{version}" if version else ""
-        target = DOCUMENT_CACHE_DIR / f"{document_id}{v_tag}.pdf"
         if target.is_file():
             return target
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(R2Storage().get_bytes(str(row[0])))
+        _write_cache(target, R2Storage().get_bytes(str(row["storage_key"])))
         return target
-    except Exception:
+    except Exception as exc:
+        logger.warning("No se pudo recuperar el PDF de la caché remota", extra={
+            "document_id": document_id, "document_version": version, "error_type": type(exc).__name__,
+        })
         return None
-
-
-OFFICIAL_DOCUMENT_TITLES = {
-    "C1": "Informe de Gestión 2026 · Alpina",
-    "C2": "Informe de Sostenibilidad 2025 · Alpina",
-    "C3": "Informe Alpina BIC 2025",
-    "C4": "Estados Financieros Separados 2025 · Alpina S.A.S. BIC",
-    "C5": "Estados Financieros Consolidados 2025 · Alpina",
-    "N1": "Ley 2120 de 2021 (Ley de Comida Chatarra)",
-    "N2": "Resolución 810 de 2021 (Etiquetado Nutricional y Frontal)",
-    "N3": "Resolución 2492 de 2022 (Sellos Frontales de Advertencia)",
-    "N4": "Resolución 2025013945 de 2025",
-    "N5": "Resolución 5109 de 2005",
-    "N6": "Resolución 333 de 2011",
-    "N7": "Resolución 2674 de 2013",
-    "N8": "Normograma de aditivos alimentarios",
-    "N9": "ABECE: aplicación Resolución 2492 de 2022 y Resolución 810 de 2021",
-    "N10": "Consolidado normativo 2026",
-    "N11": "Política de Calidad de Alpina",
-    "P1": "Portafolio de Claims Nutricionales 2024",
-    "P2": "Finesse y Yox con Defensis",
-    "P3": "Alpi10",
-    "P4": "Alpina Baby Gu",
-}
 
 
 def resolve_document_title(document_id: str) -> str:
@@ -111,12 +117,9 @@ def resolve_document_title(document_id: str) -> str:
 
 def resolve_document_pdf(document_id: str, version: str | None = None) -> Path:
     normalized = str(document_id or "").strip().upper()
-    if not re.fullmatch(r"[NPC]\d{1,2}", normalized):
-        raise PagePreviewError("Documento no válido para vista previa.")
 
     # 1. Comprobar caché local de versión específica o general
-    v_tag = f"_v{version}" if version else ""
-    cached_v = DOCUMENT_CACHE_DIR / f"{normalized}{v_tag}.pdf"
+    cached_v = _pdf_cache_path(normalized, version)
     if cached_v.is_file():
         return cached_v
 
@@ -128,11 +131,7 @@ def resolve_document_pdf(document_id: str, version: str | None = None) -> Path:
         # Si se solicitó una versión histórica específica y no existe, no caer en documento vigente
         raise PagePreviewError(f"La versión {version} del documento {normalized} no está disponible.")
 
-    # 3. Fallback a documento base local o lockfile
-    cached_base = DOCUMENT_CACHE_DIR / f"{normalized}.pdf"
-    if cached_base.is_file():
-        return cached_base
-
+    # 3. Fallback al documento base del lockfile
     lock_entry = _load_lock().get(normalized)
     if lock_entry and lock_entry.get("status") == "ok":
         local_path = BASE_DIR / str(lock_entry.get("local_path") or "")
@@ -237,43 +236,71 @@ def _highlight(image: Image.Image, boxes: list[dict], dpi: int) -> Image.Image:
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
 
+def _quote_key(quote: str | None) -> str:
+    return hashlib.sha256(quote.encode("utf-8")).hexdigest()[:16] if quote else "plain"
+
+
+def _read_cached_png(path: Path) -> tuple[bytes, dict[str, Any]] | None:
+    try:
+        payload = path.read_bytes()
+        with Image.open(io.BytesIO(payload), formats=["PNG"]) as image:
+            metadata = {"highlight_status": image.info["highlight_status"], "boxes_count": int(image.info["boxes_count"])}
+    except (OSError, KeyError, ValueError):
+        # Las previsualizaciones antiguas se regeneran con sus metadatos.
+        return None
+    return payload, metadata
+
+
+def _cache_png(path: Path, image: Image.Image, status: str, boxes_count: int) -> tuple[bytes, dict[str, Any]]:
+    metadata = {"highlight_status": status, "boxes_count": boxes_count}
+    png_info = PngInfo()
+    for key, value in metadata.items():
+        png_info.add_text(key, str(value))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", pnginfo=png_info, optimize=True)
+    payload = buffer.getvalue()
+    _write_cache(path, payload)
+    return payload, metadata
+
+
 def render_product_sheet_png(
     product_id: str,
     quote: str | None = None,
     return_meta: bool = False,
 ) -> bytes | tuple[bytes, dict[str, Any]]:
-    clean = str(product_id or "").strip()
-    sku_val = clean.lower()
-    sku_num = sku_val.replace("sku-", "").replace("product-", "")
+    requested_id = str(product_id or "").strip().lower()
+    catalog_id = requested_id.removeprefix("product-")
+    bare_id = catalog_id.removeprefix("sku-")
+    candidates = [requested_id, catalog_id, f"sku-{bare_id}", bare_id]
 
-    quote_key = (
-        hashlib.sha256(" ".join((quote or "").split()).encode("utf-8")).hexdigest()[:16]
-        if quote
-        else "plain"
-    )
-    cache_path = CACHE_DIR / "products" / f"{sku_val}-{quote_key}.png"
-    if cache_path.is_file() and not return_meta:
-        return cache_path.read_bytes()
+    quote = " ".join((quote or "").split()) or None
+    sku_key = hashlib.sha256(requested_id.encode("utf-8")).hexdigest()[:20]
+    cache_path = CACHE_DIR / "products" / f"{sku_key}-{_quote_key(quote)}.png"
+    if cached := _read_cached_png(cache_path):
+        return cached if return_meta else cached[0]
 
     with connect() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                select id, name, brand, presentation, price::float8,
-                       protein_g::float8, claims, availability, ean, metadata
+                select id, name, brand, presentation, price::float8 as price,
+                       protein_g::float8 as protein_g, claims, ean, metadata,
+                       ingredients, allergens
                 from public.products
-                where id ilike %s or id ilike %s or id ilike %s
+                where lower(id) = any(%s::text[])
+                order by array_position(%s::text[], lower(id)), id
                 limit 1
                 """,
-                (sku_val, f"sku-{sku_num}", sku_num),
+                (candidates, candidates),
             )
             row = cur.fetchone()
 
     if not row:
         raise PagePreviewError(f"No se encontró información del producto con SKU {product_id}.")
 
-    pid, name, brand, pres, price, protein, claims, avail, ean, meta = row
-    meta = meta or {}
+    pid, name, brand, pres = row["id"], row["name"], row["brand"], row["presentation"]
+    price, protein, claims, ean = row["price"], row["protein_g"], row["claims"], row["ean"]
+    meta = row["metadata"] if isinstance(row["metadata"], dict) else {}
 
     W, H = 700, 920
     img = Image.new("RGB", (W, H), color="#f8fafc")
@@ -361,6 +388,7 @@ def render_product_sheet_png(
         cy += 36
 
     # Recuadro resaltado de la cita consultada
+    has_text_match = False
     if quote:
         cy += 14
         draw.text((45, cy), "EVIDENCIA DE CITA AUDITADA", fill="#d97706", font=f_sub)
@@ -374,8 +402,10 @@ def render_product_sheet_png(
             draw.text((62, qy), ql, fill="#92400e", font=f_quote)
             qy += 20
         # Verificar si la cita coincide textualmente con algún atributo de la ficha (F10, F12)
-        full_prod_text = f"{name} {desc} {' '.join(c_list)} {pres} {row.get('ingredients') or ''} {row.get('allergens') or ''}".casefold()
-        has_text_match = bool(quote and quote.strip().casefold() in full_prod_text)
+        fields = (name, desc, pres, row["ingredients"], row["allergens"], *c_list)
+        full_prod_text = " ".join(str(value) for value in fields if value).casefold()
+        normalized_quote = quote.strip().casefold()
+        has_text_match = bool(normalized_quote and normalized_quote in full_prod_text)
         match_msg = (
             "Coincidencia textual verificada en la ficha oficial."
             if has_text_match
@@ -388,19 +418,12 @@ def render_product_sheet_png(
     draw.text((45, H - 48), "✓  Verificación Oficial de Producto Alpina · Supabase pgvector", fill="#059669", font=f_body_b)
     draw.text((W - 170, H - 48), "Agente Documental IA", fill="#64748b", font=f_sm)
 
-    buffer = io.BytesIO()
-    img.save(buffer, format="PNG", optimize=True)
-    payload = buffer.getvalue()
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_bytes(payload)
-
     status = "plain"
     if quote:
         status = "exact" if has_text_match else "none"
 
-    if return_meta:
-        return payload, {"highlight_status": status, "boxes_count": 1 if has_text_match else 0}
-    return payload
+    cached = _cache_png(cache_path, img, status, int(has_text_match))
+    return cached if return_meta else cached[0]
 
 
 def render_page_png(
@@ -421,17 +444,13 @@ def render_page_png(
 
     pdf_path = resolve_document_pdf(document_id, version=version)
     pdf_stat = pdf_path.stat()
-    file_tag = f"{int(pdf_stat.st_mtime)}_{pdf_stat.st_size}"
-    quote_key = (
-        hashlib.sha256(" ".join((quote or "").split()).encode("utf-8")).hexdigest()[:16]
-        if quote
-        else "plain"
-    )
+    file_tag = f"{pdf_stat.st_mtime_ns}_{pdf_stat.st_size}"
+    quote = " ".join((quote or "").split()) or None
     v_tag = f"v{version}_" if version else ""
-    cache_path = CACHE_DIR / normalized / f"{v_tag}p{page_number}-{quote_key}-{file_tag}-{dpi}.png"
+    cache_path = CACHE_DIR / normalized / f"{v_tag}p{page_number}-{_quote_key(quote)}-{file_tag}-{dpi}.png"
 
-    if cache_path.is_file() and not return_meta:
-        return cache_path.read_bytes()
+    if cached := _read_cached_png(cache_path):
+        return cached if return_meta else cached[0]
 
     document = pdfium.PdfDocument(str(pdf_path))
     try:
@@ -455,15 +474,8 @@ def render_page_png(
         if boxes:
             image = _highlight(image, boxes, dpi)
 
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG", optimize=True)
-    payload = buffer.getvalue()
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_bytes(payload)
-
-    if return_meta:
-        return payload, {"highlight_status": highlight_status, "boxes_count": len(boxes)}
-    return payload
+    cached = _cache_png(cache_path, image, highlight_status, len(boxes))
+    return cached if return_meta else cached[0]
 
 
 def get_document_page_count(document_id: str) -> int:

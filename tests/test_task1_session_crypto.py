@@ -3,7 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.core.crypto import encrypt_text, decrypt_text, get_fernet
+from app.core.crypto import DecryptionError, encrypt_text, decrypt_text
 from app.api.deps import derive_owner_id
 from app.db.connection import connect
 
@@ -18,15 +18,15 @@ def test_crypto_fernet_roundtrip():
     assert decrypted == original
 
 
-def test_crypto_legacy_plaintext_passthrough():
-    legacy = "Mensaje plano preexistente"
-    assert decrypt_text(legacy) == legacy
+def test_crypto_rejects_legacy_plaintext():
+    with pytest.raises(DecryptionError):
+        decrypt_text("Mensaje plano preexistente")
     assert decrypt_text("") == ""
     assert decrypt_text(None) == ""
 
 
 def test_session_isolation_and_encryption():
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://localhost")
     session_a = f"sess-test-{uuid.uuid4().hex[:8]}"
     session_b = f"sess-test-{uuid.uuid4().hex[:8]}"
 
@@ -44,7 +44,7 @@ def test_session_isolation_and_encryption():
 
     try:
         # Check raw DB row to confirm title is encrypted
-        with connect() as conn:
+        with connect(session_id=derive_owner_id(session_a)) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT title, session_id FROM public.chats WHERE id = %s", (chat_a_id,))
                 raw_row = cur.fetchone()

@@ -20,7 +20,7 @@ El proyecto fue diseñado bajo una filosofía de **cero dependencias pesadas loc
 | Requisito | Detalle |
 | :--- | :--- |
 | **Sistema Operativo** | Windows 10/11 (recomendado para 1 clic), Linux (Ubuntu/Debian/Fedora/etc.) o macOS |
-| **Intérprete Python** | Versión **3.10, 3.11, 3.12 o 3.13** (probado y verificado) |
+| **Intérprete Python** | Versiones **3.12, 3.13 o 3.14** |
 | **Opción PATH en Windows** | ⚠️ **Crucial**: Al instalar Python, marcar la casilla `[X] Add python.exe to PATH` en la primera pantalla del instalador |
 | **Conexión a Internet** | Requerida en el primer inicio para descargar dependencias de `requirements.txt` y comunicarse con las APIs en la nube (Groq, Cohere, Supabase, Cloudflare R2) |
 | **Navegador Web** | Google Chrome, Microsoft Edge, Brave, Firefox o Safari |
@@ -62,7 +62,7 @@ Si prefieres ejecutar el proyecto mediante terminal o estás en un sistema basad
 # 1. Descomprimir el archivo ZIP y entrar a la carpeta
 cd Dylan_Hernandez-Agente_Alpina
 
-# 2. Crear el entorno virtual con Python 3.10+
+# 2. Crear el entorno virtual con Python 3.12 a 3.14
 python3 -m venv .venv
 
 # 3. Activar el entorno virtual
@@ -76,8 +76,7 @@ source .venv/bin/activate
 # 4. Instalar las dependencias exactas
 pip install -r requirements.txt
 
-# 5. Asegurar el archivo de configuración .env
-# (El paquete ya incluye .env configurado; si no existiera:)
+# 5. Crear .env en la primera instalación y completar los valores del entorno
 cp .env.example .env
 
 # 5b. Verificar y aplicar migraciones de esquema
@@ -93,7 +92,7 @@ Abre en tu navegador: **`http://127.0.0.1:8000`**.
 
 ## 5. Configuración de Variables de Entorno (`.env`)
 
-El paquete portable se distribuye con el archivo `.env` listo para usar. A continuación se documenta el propósito de cada variable:
+Usa `.env.example` para crear tu configuración local. Completa `.env` con credenciales de tu entorno antes de arrancar el servicio.
 
 ```env
 # Configuración del Servidor
@@ -104,6 +103,8 @@ APP_PORT=8000
 # Base de Datos Supabase (PostgreSQL 15 con extensión pgvector)
 # Utiliza connection pooling (Session pooler) compatible con redes corporativas y TLS obligatorio
 DATABASE_URL=postgresql://alpina_app.<ref>:<password>@<host>:5432/postgres?sslmode=require
+MIGRATION_DATABASE_URL=
+CHAT_ENCRYPTION_KEY=
 
 # Groq Cloud (Inferencia de ultra-baja latencia para LLMs)
 GROQ_API_KEY=gsk_...
@@ -193,5 +194,5 @@ El paquete comprimido `.zip` contiene **únicamente el código fuente esencial, 
 - ✅ **Incluido**: Interfaz web completa en `app/static/` (CSS, JS, iconos, visor de evidencias).
 - ✅ **Incluido**: Script de automatización universal `iniciar.bat`.
 - ✅ **Incluido**: Archivos de especificación de dependencias (`requirements.txt`, `pyproject.toml`).
-- ✅ **Incluido**: Plantilla y archivo de configuración (`.env`, `.env.example`).
+- ✅ **Plantilla de configuración** en `.env.example`. Cada instalación configura su propio `.env` local.
 - ✅ **Incluido**: Documentación técnica (`README.md`, `PORTABILITY.md`, `LEEME.txt`).

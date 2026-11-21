@@ -1,6 +1,6 @@
 # 🥛 Agente RAG Corporativo Alpina
 
-[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.2+-orange.svg)](https://langchain-ai.github.io/langgraph/)
 [![Supabase](https://img.shields.io/badge/Supabase-pgvector%2015+-3ECF8E.svg?logo=supabase&logoColor=white)](https://supabase.com/)
@@ -128,8 +128,7 @@ Dylan_Hernandez-Agente_Alpina/
 │   ├── processed/                 # Textos procesados
 │   ├── raw/                       # Documentos PDF originales
 │   └── reports/                   # Almacenamiento local de reportes generados
-├── .env                           # Variables de entorno listas para usar
-├── .env.example                   # Plantilla de variables de entorno
+├── .env.example                   # Plantilla para el archivo .env local
 ├── .gitignore                     # Exclusión de archivos temporales y entornos
 ├── iniciar.bat                    # Script universal de arranque en 1 clic (Windows)
 ├── LEEME.txt                      # Instrucciones breves de inicio rápido en texto plano
@@ -144,19 +143,16 @@ Dylan_Hernandez-Agente_Alpina/
 
 ### Opción A: En Windows (1 Solo Clic) 🏆
 
-1. Descomprime la carpeta del proyecto.
-2. Haz doble clic sobre:
-   ```text
-   iniciar.bat
-   ```
-3. El script detectará tu instalación de Python, creará el entorno virtual `.venv`, instalará los paquetes requeridos, validará las credenciales y **abrirá automáticamente tu navegador en `http://127.0.0.1:8000`**.
+1. Clona o descomprime el proyecto.
+2. Crea `.env` a partir de `.env.example` y configura las credenciales de tu entorno.
+3. Ejecuta `iniciar.bat` con doble clic. El script prepara el entorno, comprueba el esquema de la base de datos y abre `http://127.0.0.1:8000` en el navegador.
 
 ---
 
 ### Opción B: Inicio Manual (Linux / macOS / PowerShell)
 
 ```bash
-# 1. Crear entorno virtual con Python 3.10 o superior
+# 1. Crear el entorno virtual con Python 3.12 a 3.14
 python3 -m venv .venv
 
 # 2. Activar el entorno virtual
@@ -170,7 +166,11 @@ source .venv/bin/activate
 # 3. Instalar dependencias requeridas
 pip install -r requirements.txt
 
-# 4. Iniciar el servidor
+# 4. Crear .env en la primera instalación y completar sus valores antes de migrar
+cp .env.example .env
+python -m app.db.migrate
+
+# 5. Iniciar el servidor
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
@@ -180,7 +180,7 @@ Abre en tu navegador: **`http://127.0.0.1:8000`**.
 
 ## ⚙️ Variables de Entorno (`.env`)
 
-El proyecto incluye un archivo `.env` precargado con credenciales de prueba activas. Para entornos personalizados, consulta `.env.example`:
+Crea tu `.env` local a partir de `.env.example`. Git excluye el archivo con las credenciales de cada entorno.
 
 | Variable | Descripción | Valor por Defecto / Ejemplo |
 | :--- | :--- | :--- |
@@ -188,6 +188,14 @@ El proyecto incluye un archivo `.env` precargado con credenciales de prueba acti
 | `APP_HOST` | Host de enlace del servidor | `127.0.0.1` |
 | `APP_PORT` | Puerto de escucha | `8000` |
 | `DATABASE_URL` | Conexión PostgreSQL a Supabase con pgvector | `postgresql://alpina_app...` |
+| `MIGRATION_DATABASE_URL` | Conexión del rol migrador propietario del esquema | Requerida para aplicar migraciones pendientes |
+| `CHAT_ENCRYPTION_KEY` | Claves Fernet separadas por comas, con la clave primaria primero | Obligatoria en producción |
+| `TRUSTED_HOSTS` | Lista JSON de nombres de host aceptados por la API | `["localhost","127.0.0.1","[::1]"]` |
+| `CORS_ALLOWED_ORIGINS` | Lista JSON de orígenes HTTP(S) autorizados | `[]` |
+| `CORS_ALLOW_ALL` | Habilita solicitudes de cualquier origen sin credenciales | `false` |
+| `RATE_LIMIT_IP` | Límite compartido de solicitudes a `/api/` por IP | `300/minute` |
+| `RATE_LIMIT_SESSION` | Límite compartido de solicitudes a `/api/` por sesión | `120/minute` |
+| `RATE_LIMIT_STORAGE_URI` | Almacenamiento de los contadores de SlowAPI | `memory://` |
 | `GROQ_API_KEY` | Clave de API de Groq Cloud | `gsk_...` |
 | `GROQ_MODEL_ANSWER`| Modelo principal de generación de respuestas | `openai/gpt-oss-120b` |
 | `GROQ_MODEL_ROUTER`| Modelo ligero para clasificación y ruteo | `openai/gpt-oss-20b` |
@@ -197,6 +205,20 @@ El proyecto incluye un archivo `.env` precargado con credenciales de prueba acti
 | `COHERE_EMBED_DIM` | Dimensiones del vector | `1024` |
 | `R2_ACCOUNT_ID` | Cloudflare Account ID para almacenamiento R2 | *(Opcional)* |
 | `R2_BUCKET` | Nombre del bucket en Cloudflare R2 | `agent-alpina` |
+
+Aplica `python -m app.db.migrate` con `MIGRATION_DATABASE_URL` antes de arrancar la versión que exige la migración 008. El proceso web usa `DATABASE_URL` con `alpina_app`. La migración asigna a los informes heredados sin sesión el propietario de su chat cuando está disponible. El arranque comprueba RLS y configura las políticas de los checkpoints de LangGraph.
+
+En producción, incluye el nombre público de la aplicación en `TRUSTED_HOSTS`. Para un frontend en otro origen, añade su URL exacta a `CORS_ALLOWED_ORIGINS`. Si Uvicorn recibe solicitudes a través de un proxy, limita `--forwarded-allow-ips` a los proxies que controlas. Esto permite obtener el esquema HTTPS y la IP de cliente de las cabeceras que solo esos proxies pueden proporcionar. [Configuración de proxies de Uvicorn](https://uvicorn.dev/deployment/#proxies-and-forwarded-headers)
+
+Los contadores en memoria son independientes por proceso. Un despliegue con varios procesos puede compartirlos con `RATE_LIMIT_STORAGE_URI=redis://…` y la dependencia `limits[redis]`. [Almacenamiento de SlowAPI](https://slowapi.readthedocs.io/en/latest/examples/)
+
+Para rotar claves, configura la nueva clave como primera y conserva las anteriores hasta terminar de recifrar los registros y checkpoints existentes. Reinicia los procesos al cambiar las variables de entorno del despliegue. `decrypt_text` exige un token Fernet válido. Los registros que aún contengan texto plano requieren un recifrado de mantenimiento antes de volver a leerse desde la API.
+
+### Código conservado en la revisión
+
+`generate_word_report` y `rotate_encrypted_text` cuentan con pruebas directas. La generación de informes de la API usa `generate_report` y el cifrado normal usa la clave primaria sin invocar el helper de rotación.
+
+Los modelos de `app/api/schemas/products.py` y `app/api/schemas/system.py` se conservan como referencia. Las rutas de productos y sistema declaran sus respuestas como diccionarios.
 
 ---
 
@@ -211,7 +233,7 @@ El proyecto incluye un archivo `.env` precargado con credenciales de prueba acti
 | `GET` | `/api/products` | Consulta y filtrado del catálogo de productos de Alpina |
 | `GET` | `/api/products/{id}` | Detalle nutricional, ingredientes y sellos de un producto |
 | `GET` | `/api/documents` | Listado de documentos oficiales y estados financieros indexados |
-| `POST`| `/api/reports` | Solicitud explícita de generación de reporte (PDF/Excel) |
+| `POST`| `/api/chats/{chat_id}/reports` | Generación de un informe PDF, Excel o Word a partir de un turno del chat |
 | `GET` | `/api/reports/{id}/download` | Descarga de un reporte generado |
 | `GET` | `/docs` | Documentación interactiva de la API con Swagger UI |
 

@@ -1,11 +1,13 @@
 from uuid import uuid4
 
 import pytest
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.agent import graph, prompts
+from app.agent import graph, prompts, report_tools
 from app.agent.llm import LlmError, parse_json_content
 from app.agent.validation import validate_answer_payload
+from app.core.markdown import render_markdown
 
 
 QUESTION = "¿Qué dice la política de calidad sobre inocuidad?"
@@ -66,6 +68,23 @@ def test_chat_distinguishes_retrieval_failure_from_missing_evidence():
     assert result["abstained"] and not result["verified"]
 
 
+def test_out_of_scope_keeps_accumulated_issues(monkeypatch):
+    monkeypatch.setattr(graph, "chat_json", lambda *args, **kwargs: {"category": "out_of_scope"})
+    result = graph.supervisor_node({
+        "messages": [HumanMessage(content="¿Cuándo lloverá en Bogotá?")],
+        "issues": ["Observación anterior"],
+    })
+    assert result["category"] == "guardrail"
+    assert result["issues"] == ["Observación anterior", "Solicitud fuera del alcance documental."]
+
+
+def test_report_without_tool_messages_returns_a_recoverable_answer():
+    result = graph.finish_report_node({"answer": "Contenido para el informe", "report_tool_messages": []})
+    assert result["generated_report"] is None
+    assert result["report_tool"] is None
+    assert prompts.REPORT_UNAVAILABLE in result["answer"]
+
+
 def test_report_follows_requested_topic_and_reuses_cited_answer(monkeypatch):
     retrieval_calls = []
     reports = []
@@ -79,7 +98,7 @@ def test_report_follows_requested_topic_and_reuses_cited_answer(monkeypatch):
         return {"report_type": kwargs["report_type"]}
 
     monkeypatch.setattr(graph, "chat_json", lambda *args, **kwargs: PAYLOAD)
-    monkeypatch.setattr(graph, "create_report_record", generate)
+    monkeypatch.setattr(report_tools, "create_report_record", generate)
     app = graph.build_graph(InMemorySaver(), retrieve_fn=retrieve)
     chat_id = str(uuid4())
     session_id = str(uuid4())
@@ -89,6 +108,7 @@ def test_report_follows_requested_topic_and_reuses_cited_answer(monkeypatch):
     assert not initial["generated_report"]
     report = graph.ask(app, QUESTION, chat_id, session_id=session_id)
     assert report["verified"] and report["generated_report"]["report_type"] == "pdf"
+    assert report["report_tool"] == "generar_pdf"
 
     for request, fmt in [("Pásamelo a Word", "docx"), ("Dame la respuesta en Excel", "xlsx")]:
         exported = graph.ask(app, request, chat_id, session_id=session_id)
@@ -101,3 +121,54 @@ def test_report_follows_requested_topic_and_reuses_cited_answer(monkeypatch):
     assert retrieval_calls == [QUESTION]
     assert len(reports) == 3
     assert all(item["question"] == QUESTION and item["session_id"] == session_id for item in reports)
+
+
+def test_chat_markdown_preserves_prose_lists_and_tables():
+    html = render_markdown(
+        "## Resultados\nPárrafo inicial.\n\n"
+        "3. Primer paso\n   - Paso secundario\n\n"
+        "Producto | Cantidad\n--- | ---:\nAvena \\| Alpina | **12**\n\n"
+        "> Nota *relevante*.\n\n"
+        "<em>Texto literal</em>\n\n"
+        "~~~text\nlínea uno\n\nlínea tres\n~~~"
+    )
+    assert "<h2>Resultados</h2>\n<p>Párrafo inicial.</p>" in html
+    assert '<ol start="3">\n<li>Primer paso\n<ul>' in html
+    assert "<td>Avena | Alpina</td>" in html
+    assert '<td style="text-align:right"><strong>12</strong></td>' in html
+    assert "<blockquote>" in html and "<em>relevante</em>" in html
+    assert "&lt;em&gt;Texto literal&lt;/em&gt;" in html
+    assert "línea uno\n\nlínea tres" in html
+
+
+def test_detailed_report_expands_previous_question_with_broader_evidence(monkeypatch):
+    retrieved = []
+    model_calls = []
+
+    def retrieve(query, filters):
+        retrieved.append((query, filters.coverage))
+        return [EVIDENCE] * 9
+
+    def model(_model, _system, prompt, **options):
+        model_calls.append((prompt, options))
+        return {
+            "answer": "~~~markdown\n## Inspecciones\n\nLa política establece una inspección mensual.\n~~~",
+            "citations": [{"source": 1, "quote": "inspección mensual"}],
+            "abstained": False,
+        }
+
+    monkeypatch.setattr(graph, "chat_json", model)
+    monkeypatch.setattr(report_tools, "create_report_record", lambda **_: {"report_type": "docx"})
+    app = graph.build_graph(InMemorySaver(), retrieve_fn=retrieve)
+    chat_id = str(uuid4())
+    first = graph.ask(app, QUESTION, chat_id)
+    assert first["verified"] and first["report_tool"] is None
+    assert first["answer"].startswith("## Inspecciones")
+    assert "<h2>Inspecciones</h2>" in render_markdown(first["answer"])
+
+    report = graph.ask(app, "Genera un informe detallado en Word de lo anterior", chat_id)
+    assert report["report_tool"] == "generar_word"
+    assert retrieved == [(QUESTION, False), (QUESTION, True)]
+    prompt, options = model_calls[-1]
+    assert "[FUENTE 9]" in prompt and QUESTION in prompt
+    assert options["max_tokens"] > model_calls[0][1]["max_tokens"]

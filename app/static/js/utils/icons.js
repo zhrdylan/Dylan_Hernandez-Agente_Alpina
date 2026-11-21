@@ -18,8 +18,3 @@ export function refreshIcons(root = document) {
     }
   }
 }
-
-export function iconHtml(name, { size = 16, className = "" } = {}) {
-  return `<i data-lucide="${name}" class="ui-icon ${className}" style="width:${size}px; height:${size}px;"></i>`;
-}
-

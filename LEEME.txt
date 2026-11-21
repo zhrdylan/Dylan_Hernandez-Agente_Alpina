@@ -8,7 +8,7 @@ computador con Windows de forma directa y automática.
 ------------------------------------------------------------------------
 1. REQUISITOS PREVIOS
 ------------------------------------------------------------------------
-- Tener instalado Python (versiones recomendadas: 3.10, 3.11, 3.12 o 3.13)
+- Tener instalado Python 3.12, 3.13 o 3.14.
   Descárgalo de: https://www.python.org/downloads/
   * IMPORTANTE: Al instalar, marca la casilla "Add python.exe to PATH"
     en la parte inferior de la primera ventana del instalador.
@@ -19,15 +19,14 @@ computador con Windows de forma directa y automática.
 ------------------------------------------------------------------------
 2. CÓMO INICIAR (1 SOLO CLIC)
 ------------------------------------------------------------------------
-Simplemente haz doble clic sobre el archivo:
-
-    👉 iniciar.bat
+Copia .env.example a .env y completa los valores de tu entorno. Después,
+haz doble clic en iniciar.bat.
 
 El script se encargará automáticamente de todo:
   1. Detectará tu instalación de Python.
   2. Creará el entorno virtual local (.venv).
   3. Instalará las librerías necesarias desde requirements.txt.
-  4. Verificará las credenciales del archivo .env.
+  4. Verificará la conexión y el esquema de la base de datos.
   5. Abrirá automáticamente tu navegador en http://127.0.0.1:8000.
   6. Iniciará el servidor web del asistente.
 

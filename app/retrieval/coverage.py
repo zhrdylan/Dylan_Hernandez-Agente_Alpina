@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from typing import Any, Iterable
+
+from app.core.utils import ascii_fold, get_value
 
 COVERAGE_PATTERNS = [
     re.compile(r"\btodos\s+los\s+documentos\b"),
@@ -19,20 +20,9 @@ COVERAGE_PATTERNS = [
 ]
 
 
-def _normalize(text: str) -> str:
-    value = unicodedata.normalize("NFKD", str(text or ""))
-    return value.encode("ascii", "ignore").decode("ascii").lower()
-
-
 def needs_coverage(query: str) -> bool:
-    normalized = _normalize(query)
+    normalized = ascii_fold(query).lower()
     return any(pattern.search(normalized) for pattern in COVERAGE_PATTERNS)
-
-
-def _value(item: Any, key: str, default: Any = None) -> Any:
-    if isinstance(item, dict):
-        return item.get(key, default)
-    return getattr(item, key, default)
 
 
 def merge_coverage_results(
@@ -43,12 +33,12 @@ def merge_coverage_results(
 ) -> list[Any]:
     merged = list(base or [])
     seen = {
-        str(_value(item, "document_id", ""))
+        str(get_value(item, "document_id", ""))
         for item in merged
-        if _value(item, "document_id")
+        if get_value(item, "document_id")
     }
     for item in extra or []:
-        document_id = str(_value(item, "document_id", ""))
+        document_id = str(get_value(item, "document_id", ""))
         if not document_id or document_id in seen:
             continue
         if len(seen) >= max_documents:

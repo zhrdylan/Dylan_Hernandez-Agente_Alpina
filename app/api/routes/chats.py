@@ -1,35 +1,35 @@
 from __future__ import annotations
 
+import logging
+import uuid
 from datetime import date, datetime
 from decimal import Decimal
-import logging
-from pathlib import Path
 from typing import Any
-import uuid
 
-logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from app.agent.checkpoints import delete_chat_checkpoints
 from app.agent.graph import ask
 from app.agent.progress import clear_progress, get_progress
 from app.agent.prompts import ABSTENTION
 from app.agent.trace import build_retrieval_items, summarize_retrieval
 from app.api.deps import (
-    chat_uuid as validate_chat_uuid,
+    OwnedChat,
     get_agent_graph,
-    get_checkpointer,
     get_current_session_id,
-    get_current_user_id,
+    get_owned_chat,
 )
 from app.api.schemas.chats import ChatCreate, MessageCreate
 from app.config import settings
 from app.core.crypto import decrypt_text, encrypt_text
+from app.core.markdown import render_markdown, unwrap_markdown
 from app.db.connection import connect
-from app.storage.r2 import R2Storage
+from app.reports.service import remove_report_files
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
+logger = logging.getLogger(__name__)
 
 
 def _json_safe(val: Any) -> Any:
@@ -50,7 +50,7 @@ def _json_safe(val: Any) -> Any:
 @router.get("")
 def list_chats(session_id: str = Depends(get_current_session_id)) -> list[dict]:
     """Lista las conversaciones activas de la sesión actual ordenadas por actualización reciente."""
-    with connect() as conn:
+    with connect(session_id=session_id) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -79,7 +79,7 @@ def create_chat(
     plain_title = " ".join(plain_title.split())[:120] or "Nuevo chat"
     enc_title = encrypt_text(plain_title)
 
-    with connect() as conn:
+    with connect(session_id=session_id) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -96,39 +96,16 @@ def create_chat(
 
 
 @router.get("/{chat_id}/progress")
-def chat_progress(
-    chat_id: str,
-    session_id: str = Depends(get_current_session_id),
-) -> dict:
+def chat_progress(chat: OwnedChat = Depends(get_owned_chat)) -> dict:
     """Consulta el nodo activo y progreso en streaming del agente para un chat."""
-    chat_id_clean = validate_chat_uuid(chat_id)
-    with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "select 1 from public.chats where id = %s and session_id = %s",
-                (chat_id_clean, session_id),
-            )
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="Chat no encontrado.")
-    return get_progress(chat_id_clean) or {"node": None, "status": "idle"}
+    return get_progress(chat.id) or {"node": None, "status": "idle"}
 
 
 @router.get("/{chat_id}/messages")
-def list_messages(
-    chat_id: str,
-    session_id: str = Depends(get_current_session_id),
-) -> list[dict]:
+def list_messages(chat: OwnedChat = Depends(get_owned_chat)) -> list[dict]:
     """Obtiene el historial cronológico de mensajes descifrados de un chat."""
-    chat_id_clean = validate_chat_uuid(chat_id)
-    with connect() as conn:
+    with connect(session_id=chat.session_id) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "select id from public.chats where id = %s and session_id = %s",
-                (chat_id_clean, session_id),
-            )
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="Chat no encontrado.")
-
             cur.execute(
                 """
                 select id::text as id, role, content, citations, model,
@@ -137,63 +114,34 @@ def list_messages(
                 where chat_id = %s
                 order by created_at asc, case when role = 'user' then 0 else 1 end, id asc
                 """,
-                (chat_id_clean,),
+                (chat.id,),
             )
             messages = list(cur.fetchall())
-            for msg in messages:
-                if msg.get("content"):
-                    msg["content"] = decrypt_text(msg["content"])
-            return messages
+    for msg in messages:
+        msg["content"] = decrypt_text(msg.get("content"))
+        text = unwrap_markdown(msg["content"]) if msg["role"] == "assistant" else msg["content"]
+        msg["content_html"] = render_markdown(text)
+        if isinstance(msg.get("metadata"), dict):
+            msg["metadata"].pop("report_question", None)
+    return messages
 
 
 @router.post("/{chat_id}/messages")
 def send_message(
-    chat_id: str,
     payload: MessageCreate,
     request: Request,
-    session_id: str = Depends(get_current_session_id),
+    chat: OwnedChat = Depends(get_owned_chat),
 ) -> dict:
     """Envía un mensaje al agente RAG, ejecuta el grafo y guarda la respuesta cifrada en reposo."""
-    chat_id_clean = validate_chat_uuid(chat_id)
-    content = payload.content.strip()
-    if not content:
+    chat_id_clean = chat.id
+    session_id = chat.session_id
+    content = payload.content.strip(" \r\n")
+    if not content.strip():
         raise HTTPException(status_code=422, detail="El mensaje está vacío.")
 
     graph = get_agent_graph(request)
 
-    with connect() as conn:
-        with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "select id, title from public.chats where id = %s and session_id = %s",
-                (chat_id_clean, session_id),
-            )
-            chat = cur.fetchone()
-            if not chat:
-                raise HTTPException(status_code=404, detail="Chat no encontrado.")
-
-            enc_user_content = encrypt_text(content)
-            cur.execute(
-                """
-                insert into public.messages (chat_id, role, content, metadata)
-                values (%s, 'user', %s, %s)
-                returning id::text as id, created_at
-                """,
-                (chat_id_clean, enc_user_content, Jsonb({"source": "web"})),
-            )
-            user_message = cur.fetchone()
-            if user_message:
-                user_message["content"] = content
-
-            raw_title = chat.get("title")
-            current_title = decrypt_text(raw_title) if raw_title else ""
-            if not current_title or current_title == "Nuevo chat":
-                current_title = " ".join(content.split())[:60]
-                enc_title = encrypt_text(current_title)
-                cur.execute(
-                    "update public.chats set title = %s, updated_at = now() where id = %s",
-                    (enc_title, chat_id_clean),
-                )
-
+    enc_user_content = encrypt_text(content)
     clear_progress(chat_id_clean)
     try:
         result = ask(graph, content, chat_id_clean, session_id=session_id)
@@ -215,6 +163,8 @@ def send_message(
     abstained = bool(result.get("abstained"))
     verified = bool(result.get("verified"))
     category = result.get("category")
+    report_request = result.get("report_request") or {}
+    report_user_provided = bool(report_request.get("content")) and not abstained
     verification_mode = "citas" if verified else None
     graph_trace = [
         {
@@ -229,7 +179,7 @@ def send_message(
                 f"{retrieved_chunks} fragmentos de {unique_documents} documentos "
                 f"y {product_count} productos"
                 if retrieved
-                else "Sin fuentes recuperadas"
+                else ("Datos del usuario" if report_user_provided else "Sin fuentes recuperadas")
             ),
         },
         {
@@ -251,6 +201,12 @@ def send_message(
             ),
         },
     ]
+    if tool_name := result.get("report_tool"):
+        graph_trace.append({
+            "node": "report",
+            "status": "ok" if result.get("generated_report") else "warn",
+            "detail": tool_name,
+        })
     timings = result.get("timings") or {}
     for step in graph_trace:
         duration = timings.get(step["node"])
@@ -272,13 +228,34 @@ def send_message(
         "product_count": product_count,
         "citation_count": len(citations),
         "generated_report": result.get("generated_report"),
+        "report_user_provided": report_user_provided,
     }
+    report_question = (result.get("last_verified") or {}).get("question")
+    stored_metadata = dict(metadata)
+    if verified and report_question:
+        stored_metadata["report_question"] = encrypt_text(report_question)
 
     answer_text = result.get("answer") or ABSTENTION
     enc_assistant_content = encrypt_text(answer_text)
+    user_html = render_markdown(content)
+    answer_html = render_markdown(unwrap_markdown(answer_text))
 
-    with connect() as conn:
+    with connect(session_id=session_id) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            try:
+                chat_row = chat.require(conn, lock=True)
+            except HTTPException:
+                clear_progress(chat_id_clean)
+                raise
+            cur.execute(
+                """
+                insert into public.messages (chat_id, role, content, metadata)
+                values (%s, 'user', %s, %s)
+                returning id::text as id, created_at
+                """,
+                (chat_id_clean, enc_user_content, Jsonb({"source": "web"})),
+            )
+            user_message = {**cur.fetchone(), "content": content, "content_html": user_html}
             cur.execute(
                 """
                 insert into public.messages
@@ -293,15 +270,16 @@ def send_message(
                     Jsonb(_json_safe(citations)),
                     settings.groq_model_answer,
                     Jsonb({}),
-                    Jsonb(_json_safe(metadata)),
+                    Jsonb(_json_safe(stored_metadata)),
                 ),
             )
-            assistant_message = cur.fetchone()
-            if assistant_message:
-                assistant_message["content"] = answer_text
+            assistant_message = {**cur.fetchone(), "content": answer_text, "content_html": answer_html}
+            title = chat_row["title"]
+            if not title or decrypt_text(title) == "Nuevo chat":
+                title = encrypt_text(" ".join(content.split())[:60])
             cur.execute(
-                "update public.chats set updated_at = now() where id = %s",
-                (chat_id_clean,),
+                "update public.chats set title = %s, updated_at = now() where id = %s",
+                (title, chat_id_clean),
             )
 
     return {
@@ -320,134 +298,20 @@ def send_message(
     }
 
 
-def _cleanup_reports_and_checkpoints(conn, chat_ids: list[str], session_id: str | None = None) -> None:
-    if not chat_ids and not session_id:
-        return
-    with conn.cursor(row_factory=dict_row) as cur:
-        # Revocar reportes de inmediato en base de datos para impedir descargas concurrentes
-        # Usamos status = 'failed' y metadata {revoked: true} para respetar check constraints existentes
-        rev_query = (
-            "update public.reports set status = 'failed', "
-            "metadata = jsonb_set(coalesce(metadata, '{}'::jsonb), '{revoked}', 'true'::jsonb), "
-            "updated_at = now() where chat_id = any(%s::uuid[])"
-        )
-        rev_params: list[Any] = [chat_ids]
-        if session_id:
-            rev_query += " or session_id = %s"
-            rev_params.append(session_id)
-        cur.execute(rev_query, tuple(rev_params))
-
-        query = "select id, storage_key, metadata from public.reports where chat_id = any(%s::uuid[])"
-        params: list[Any] = [chat_ids]
-        if session_id:
-            query += " or session_id = %s"
-            params.append(session_id)
-        cur.execute(query, tuple(params))
-        reports = cur.fetchall()
-        for r in reports:
-            meta = r.get("metadata") or {}
-            local_path = Path(str(meta.get("path") or ""))
-            if local_path.is_file():
-                try:
-                    local_path.unlink(missing_ok=True)
-                except Exception as exc:
-                    logger.warning("Fallo al eliminar archivo local de reporte %s: %s", r.get("id"), exc)
-            r2_key = meta.get("r2_key") or r.get("storage_key")
-            if r2_key and R2Storage.is_configured():
-                try:
-                    R2Storage().delete(str(r2_key))
-                except Exception as exc:
-                    logger.warning("Fallo al eliminar archivo R2 de reporte %s: %s", r.get("id"), exc)
-
-        del_rep_query = "delete from public.reports where chat_id = any(%s::uuid[])"
-        del_rep_params: list[Any] = [chat_ids]
-        if session_id:
-            del_rep_query += " or session_id = %s"
-            del_rep_params.append(session_id)
-        cur.execute(del_rep_query, tuple(del_rep_params))
-
-        # Limpiar checkpoints con SAVEPOINT para no invalidar la transacción si las tablas no existen
-        for cid in chat_ids:
-            try:
-                cur.execute("SAVEPOINT sp_cp")
-                cur.execute("delete from langgraph.checkpoint_writes where thread_id = %s", (cid,))
-                cur.execute("delete from langgraph.checkpoint_blobs where thread_id = %s", (cid,))
-                cur.execute("delete from langgraph.checkpoints where thread_id = %s", (cid,))
-                cur.execute("RELEASE SAVEPOINT sp_cp")
-            except Exception:
-                try:
-                    cur.execute("ROLLBACK TO SAVEPOINT sp_cp")
-                except Exception:
-                    pass
-
-
-@router.delete("", status_code=204)
-def delete_all_chats(
-    request: Request,
-    session_id: str = Depends(get_current_session_id),
-) -> Response:
-    """Elimina todas las conversaciones de la sesión activa y vacía sus hilos en el checkpointer."""
-    with connect() as conn:
-        with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "select id::text as id from public.chats where session_id = %s",
-                (session_id,),
-            )
-            chat_ids = [row["id"] for row in cur.fetchall()]
-            if chat_ids:
-                _cleanup_reports_and_checkpoints(conn, chat_ids, session_id=session_id)
-                cur.execute(
-                    "delete from public.messages where chat_id = any(%s::uuid[])",
-                    (chat_ids,),
-                )
-                cur.execute(
-                    "delete from public.chats where id = any(%s::uuid[])",
-                    (chat_ids,),
-                )
-
-    checkpointer = get_checkpointer(request)
-    if checkpointer is not None and hasattr(checkpointer, "delete_thread"):
-        for chat_id in chat_ids:
-            try:
-                checkpointer.delete_thread(chat_id)
-            except Exception:
-                continue
-    return Response(status_code=204)
-
-
 @router.delete("/{chat_id}", status_code=204)
-def delete_chat(
-    chat_id: str,
-    request: Request,
-    session_id: str = Depends(get_current_session_id),
-) -> Response:
+def delete_chat(chat: OwnedChat = Depends(get_owned_chat)) -> Response:
     """Elimina una conversación específica perteneciente a la sesión activa."""
-    chat_id_clean = validate_chat_uuid(chat_id)
-    with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "select id from public.chats where id = %s and session_id = %s",
-                (chat_id_clean, session_id),
-            )
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="Chat no encontrado.")
+    with connect(session_id=chat.session_id) as conn, conn.cursor(row_factory=dict_row) as cur:
+        chat.require(conn, lock=True)
+        cur.execute(
+            "delete from public.reports where chat_id = %s returning id::text, report_type, storage_key",
+            (chat.id,),
+        )
+        reports = cur.fetchall()
+        delete_chat_checkpoints(conn, chat.id)
+        cur.execute("delete from public.chats where id = %s and session_id = %s", (chat.id, chat.session_id))
 
-            _cleanup_reports_and_checkpoints(conn, [chat_id_clean])
-
-            cur.execute(
-                "delete from public.messages where chat_id = %s",
-                (chat_id_clean,),
-            )
-            cur.execute(
-                "delete from public.chats where id = %s and session_id = %s",
-                (chat_id_clean, session_id),
-            )
-
-    checkpointer = get_checkpointer(request)
-    if checkpointer is not None and hasattr(checkpointer, "delete_thread"):
-        try:
-            checkpointer.delete_thread(chat_id_clean)
-        except Exception:
-            pass
-
+    clear_progress(chat.id)
+    for report in reports:
+        remove_report_files(report["id"], report["report_type"], report["storage_key"])
     return Response(status_code=204)

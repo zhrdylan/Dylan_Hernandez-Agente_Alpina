@@ -1,8 +1,51 @@
-import { state } from "../state.js";
 import { openPdfPreviewModal } from "./dossier.js";
-import { openCitationDrawer } from "./inspector.js";
-import { renderMarkdown } from "../utils/markdown.js";
+import { isProductCitation, openCitationDrawer } from "./inspector.js";
 import { refreshIcons } from "../utils/icons.js";
+
+const REPORT_FORMATS = {
+  pdf: ["PDF", "file-text"],
+  docx: ["Word", "file"],
+  xlsx: ["Excel", "file-spreadsheet"],
+};
+
+function reportDownload(report) {
+  const url = String(report.download_url || "");
+  if (!/^\/api\/reports\/[a-f0-9-]+\/download$/i.test(url)) return null;
+  const download = document.createElement("a");
+  download.href = url;
+  download.download = report.filename || "informe";
+  return download;
+}
+
+function createReportCard(report) {
+  const download = reportDownload(report);
+  const format = REPORT_FORMATS[report.report_type];
+  if (!download || !format) return null;
+  const [label, icon] = format;
+
+  const card = document.createElement("section");
+  card.className = "report-hero-card";
+  card.innerHTML = `
+    <div class="report-hero-type"><i data-lucide="${icon}" class="ui-icon"></i>${label}</div>
+    <p class="report-hero-title"></p>
+    <div class="report-hero-actions"></div>
+  `;
+  card.querySelector(".report-hero-title").textContent = report.title || "Informe de Alpina";
+  const actions = card.querySelector(".report-hero-actions");
+  if (report.report_type === "pdf") {
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "report-hero-btn preview";
+    preview.textContent = "Vista previa";
+    preview.addEventListener("click", () => openPdfPreviewModal(report));
+    actions.appendChild(preview);
+  }
+  download.className = "report-hero-btn download";
+  download.innerHTML = '<i data-lucide="download" class="ui-icon"></i>';
+  download.append("Descargar " + label);
+  actions.appendChild(download);
+  return card;
+}
 
 /**
  * Renderizador de mensajes, bienvenida interactiva y citas con iconos enriquecidos.
@@ -10,36 +53,11 @@ import { refreshIcons } from "../utils/icons.js";
 export function renderMessages(messages, onAskExample) {
   const container = document.getElementById("messages");
   if (!container) return;
+  container.setAttribute("aria-busy", "false");
 
   if (!messages || messages.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state" id="empty-state">
-        <img class="empty-logo" src="/static/brand/alpina-logo.png" alt="Alpina" />
-        <h2>¿Qué deseas consultar hoy?</h2>
-        <p>
-          Soy el Asistente Oficial de Alpina. Respondo con base en documentos oficiales,
-          normas de etiquetado y nuestro catálogo. Cada respuesta incluye trazabilidad verificada.
-        </p>
-        <div class="examples" id="examples">
-          <button class="example" type="button" data-question="¿Qué exige la Resolución 810 de 2021 sobre etiquetado frontal?">
-            <span class="example-text"><i data-lucide="scale" class="ui-icon example-icon"></i> ¿Qué exige la Resolución 810 de 2021 sobre etiquetado?</span>
-            <i data-lucide="arrow-right" class="ui-icon example-arrow"></i>
-          </button>
-          <button class="example" type="button" data-question="¿Cuánta proteína tiene el Yogurt Griego Natural 500 g y qué claims tiene?">
-            <span class="example-text"><i data-lucide="sparkles" class="ui-icon example-icon"></i> ¿Cuánta proteína tiene el Yogurt Griego Natural 500 g?</span>
-            <i data-lucide="arrow-right" class="ui-icon example-arrow"></i>
-          </button>
-          <button class="example" type="button" data-question="¿Cuáles fueron los resultados financieros de Alpina en 2025?">
-            <span class="example-text"><i data-lucide="bar-chart-3" class="ui-icon example-icon"></i> ¿Cuáles fueron los resultados financieros de 2025?</span>
-            <i data-lucide="arrow-right" class="ui-icon example-arrow"></i>
-          </button>
-          <button class="example" type="button" data-question="¿Qué dice la política de calidad sobre inocuidad alimentaria?">
-            <span class="example-text"><i data-lucide="shield-check" class="ui-icon example-icon"></i> ¿Qué establece la política de calidad e inocuidad?</span>
-            <i data-lucide="arrow-right" class="ui-icon example-arrow"></i>
-          </button>
-        </div>
-      </div>
-    `;
+    const welcome = document.getElementById("welcome-template");
+    container.replaceChildren(welcome.content.cloneNode(true));
 
     refreshIcons(container);
 
@@ -61,7 +79,15 @@ export function renderMessages(messages, onAskExample) {
   container.scrollTop = container.scrollHeight;
 }
 
-export function createMessageElement(msg) {
+export function renderChatLoading() {
+  const container = document.getElementById("messages");
+  const template = document.getElementById("chat-loading-template");
+  container.setAttribute("aria-busy", "true");
+  container.replaceChildren(template.content.cloneNode(true));
+  container.scrollTop = 0;
+}
+
+function createMessageElement(msg) {
   const isUser = msg.role === "user";
   const el = document.createElement("div");
   el.className = `message ${isUser ? "message-user" : "message-assistant"}`;
@@ -78,57 +104,29 @@ export function createMessageElement(msg) {
   const bubble = document.createElement("div");
   bubble.className = "message-bubble";
 
-  // Renderizado con parser de Markdown seguro (convierte ** en negrita, listas, etc.)
-  bubble.innerHTML = renderMarkdown(msg.content || "");
+  const content = document.createElement("div");
+  content.className = "message-content";
+  if (typeof msg.content_html === "string") {
+    content.innerHTML = msg.content_html;
+    content.querySelectorAll("table").forEach(table => {
+      const scroll = document.createElement("div");
+      scroll.className = "message-table";
+      scroll.tabIndex = 0;
+      scroll.setAttribute("role", "region");
+      scroll.setAttribute("aria-label", "Tabla del mensaje");
+      table.before(scroll);
+      scroll.appendChild(table);
+    });
+  } else {
+    content.classList.add("message-content-plain");
+    content.textContent = msg.content || "";
+  }
+  bubble.appendChild(content);
 
-  // Si el asistente generó un informe mediante Tool Calling, incrustar Tarjeta Hero
   const report = msg.metadata?.generated_report || msg.generated_report;
   if (!isUser && report) {
-    const isPdf = report.report_type === "pdf";
-    const isDocx = report.report_type === "docx";
-    const docTypeName = isPdf ? "Documento PDF Oficial" : (isDocx ? "Documento Word Oficial" : "Libro Excel Analítico");
-    const docIcon = isPdf ? "file-text" : (isDocx ? "file" : "file-spreadsheet");
-    const downloadLabel = isPdf ? "PDF" : (isDocx ? "Word" : "Excel");
-
-    const safeDownloadUrl = (report.download_url && String(report.download_url).startsWith("/api/reports/"))
-      ? escapeHtml(report.download_url)
-      : "#";
-    const safeFilename = escapeHtml(report.filename || 'reporte');
-
-    const reportCard = document.createElement("div");
-    reportCard.className = "report-hero-card";
-    reportCard.innerHTML = `
-      <div class="report-hero-badge">
-        <span class="report-hero-type">
-          <i data-lucide="${docIcon}" class="ui-icon"></i>
-          <span>${docTypeName}</span>
-        </span>
-        <span class="report-hero-status">
-          <i data-lucide="check-circle" class="ui-icon"></i>
-          <span>Oficial</span>
-        </span>
-      </div>
-      <div class="report-hero-title">${escapeHtml(report.title || "Informe Oficial · Alpina")}</div>
-      <div class="report-hero-meta">Archivo: <code>${safeFilename}</code> · Verificado con fuentes oficiales</div>
-      <div class="report-hero-actions">
-        ${isPdf ? `
-          <button class="report-hero-btn preview" type="button">
-            <i data-lucide="eye" class="ui-icon"></i>
-            <span>Previsualizar Informe PDF</span>
-          </button>
-        ` : ''}
-        <a class="report-hero-btn download" href="${safeDownloadUrl}" download="${safeFilename}">
-          <i data-lucide="download" class="ui-icon"></i>
-          <span>Descargar ${downloadLabel}</span>
-        </a>
-      </div>
-    `;
-    if (isPdf) {
-      reportCard.querySelector(".report-hero-btn.preview")?.addEventListener("click", () => {
-        openPdfPreviewModal(report);
-      });
-    }
-    bubble.appendChild(reportCard);
+    const card = createReportCard(report);
+    if (card) bubble.appendChild(card);
   }
 
   // Si es del asistente y tiene citas, agregar chips de evidencia
@@ -140,22 +138,25 @@ export function createMessageElement(msg) {
       citationsDiv.innerHTML = `
         <div class="citations-label">
           <i data-lucide="bookmark-check" class="ui-icon" style="width:14px;height:14px;"></i>
-          <span>Fuentes Oficiales Citadas (haz clic para auditar evidencia)</span>
+          <span>Fuentes oficiales citadas</span>
         </div>
         <div class="citation-chips"></div>
       `;
       const chipsContainer = citationsDiv.querySelector(".citation-chips");
       citations.forEach(c => {
+        const product = isProductCitation(c);
         const chip = document.createElement("button");
         chip.className = "citation-chip";
         chip.type = "button";
-        chip.title = "Haz clic para ver el fragmento resaltado en el PDF oficial";
+        chip.title = product ? "Ver ficha del producto" : "Ver evidencia documental";
         chip.innerHTML = `
-          <i data-lucide="file-search" class="ui-icon chip-icon"></i>
-          <strong>${escapeHtml(c.title || c.document_id)}</strong>
-          <span class="chip-page">(Pág. ${c.page || 1})</span>
+          <i data-lucide="${product ? "package" : "file-search"}" class="ui-icon chip-icon"></i>
+          <strong></strong>
+          <span class="chip-page"></span>
         `;
-        chip.onclick = () => openCitationDrawer(c);
+        chip.querySelector("strong").textContent = c.title || c.document_id;
+        chip.querySelector(".chip-page").textContent = product ? "Ficha" : `(Pág. ${c.page || 1})`;
+        chip.onclick = () => openCitationDrawer(c, chip);
         chipsContainer.appendChild(chip);
       });
       bubble.appendChild(citationsDiv);
@@ -180,6 +181,7 @@ export function createMessageElement(msg) {
     });
     actions.appendChild(copyBtn);
 
+
     bubble.appendChild(actions);
   }
 
@@ -199,28 +201,18 @@ export function showTypingIndicator() {
   typingEl.className = "message message-assistant";
   typingEl.innerHTML = `
     <div class="message-avatar"><img src="/static/brand/alpina-logo.png" alt="Alpina" /></div>
-    <div class="message-bubble typing-bubble">
-      <span class="typing-dot"></span>
-      <span class="typing-dot"></span>
-      <span class="typing-dot"></span>
-      <span style="font-size: 0.78rem; color: var(--muted); margin-left: 8px;">
-        <i data-lucide="search" class="ui-icon" style="width:13px;height:13px;margin-right:3px;"></i>
-        Analizando documentos oficiales...
-      </span>
+    <div class="message-bubble skeleton-bubble">
+      <p class="typing-status" role="status">Analizando documentos oficiales…</p>
+      <div class="skeleton skeleton-line" aria-hidden="true"></div>
+      <div class="skeleton skeleton-line" aria-hidden="true"></div>
+      <div class="skeleton skeleton-line" aria-hidden="true"></div>
     </div>
   `;
   container.appendChild(typingEl);
-  refreshIcons(typingEl);
   container.scrollTop = container.scrollHeight;
 }
 
 export function hideTypingIndicator() {
   const existing = document.getElementById("typing-indicator");
   if (existing) existing.remove();
-}
-
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = String(text || "");
-  return div.innerHTML;
 }

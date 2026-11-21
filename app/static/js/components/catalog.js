@@ -1,5 +1,5 @@
 import { api, formatCurrency } from "../api.js";
-import { state } from "../state.js";
+import { escapeHtml } from "../utils/html.js";
 import { refreshIcons } from "../utils/icons.js";
 
 /**
@@ -11,31 +11,40 @@ export async function loadAndRenderCatalog(onSelectProduct) {
   const searchInput = document.getElementById("product-search");
   if (!container) return;
 
-  container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--muted);"><i data-lucide="loader-2" class="ui-icon spin"></i> Cargando catálogo oficial...</div>`;
-  refreshIcons(container);
+  container.setAttribute("aria-busy", "true");
+  if (totalEl) totalEl.textContent = "Cargando catálogo…";
+  if (searchInput) searchInput.disabled = true;
+  container.innerHTML = `
+    <div class="product-card" aria-hidden="true">
+      <div class="skeleton product-img-placeholder"></div>
+      <div class="skeleton skeleton-line"></div>
+      <div class="skeleton skeleton-line"></div>
+    </div>
+  `.repeat(3);
 
   try {
     const data = await api("/api/products?limit=96");
-    state.productsCache = data.items || [];
-    if (totalEl) totalEl.textContent = `${data.total || data.items.length} productos oficiales`;
-    renderProductCards(state.productsCache, container, onSelectProduct);
-
-    if (searchInput) {
-      searchInput.oninput = (e) => {
-        const query = e.target.value.toLowerCase().trim();
-        const filtered = state.productsCache.filter(p =>
-          (p.name && p.name.toLowerCase().includes(query)) ||
-          (p.ean && p.ean.includes(query)) ||
-          (p.id && p.id.toLowerCase().includes(query)) ||
-          ((p.claims || []).some(c => String(c).toLowerCase().includes(query)))
-        );
-        if (totalEl) totalEl.textContent = `${filtered.length} productos`;
-        renderProductCards(filtered, container, onSelectProduct);
-      };
-    }
+    const products = data.items || [];
+    const applyFilter = () => {
+      const query = searchInput?.value.toLowerCase().trim() || "";
+      const filtered = query ? products.filter(p =>
+        (p.name && p.name.toLowerCase().includes(query)) ||
+        (p.ean && p.ean.includes(query)) ||
+        (p.id && p.id.toLowerCase().includes(query)) ||
+        ((p.claims || []).some(c => String(c).toLowerCase().includes(query)))
+      ) : products;
+      if (totalEl) totalEl.textContent = `${query ? filtered.length : data.total ?? products.length} productos`;
+      renderProductCards(filtered, container, onSelectProduct);
+    };
+    if (searchInput) searchInput.oninput = applyFilter;
+    applyFilter();
   } catch (err) {
+    if (totalEl) totalEl.textContent = "";
     container.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--red);"><i data-lucide="alert-circle" class="ui-icon"></i> Error al cargar productos: ${escapeHtml(err.message || String(err))}</div>`;
     refreshIcons(container);
+  } finally {
+    container.setAttribute("aria-busy", "false");
+    if (searchInput) searchInput.disabled = false;
   }
 }
 
@@ -46,17 +55,13 @@ function renderProductCards(products, container, onSelectProduct) {
     return;
   }
 
-  container.innerHTML = products.map(p => {
-    const imageUrl = p.image_url || (p.metadata && p.metadata.image_url) || "/static/brand/alpina-logo.png";
-    return `
+  container.innerHTML = products.map(p => `
     <div class="product-card">
       <div class="product-img-wrapper">
         <img
           class="product-img"
-          src="${imageUrl}"
           alt="${escapeHtml(p.name)}"
           loading="lazy"
-          onerror="this.onerror=null; this.src='/static/brand/alpina-logo.png'; this.classList.add('fallback-logo');"
         />
       </div>
       <div class="product-card-header">
@@ -67,36 +72,46 @@ function renderProductCards(products, container, onSelectProduct) {
         ${escapeHtml(p.presentation || "Presentación oficial")}
       </div>
       <div class="product-card-price">
-        ${p.price ? formatCurrency(p.price) : "Precio oficial no consta"}
+        ${escapeHtml(formatCurrency(p.price))}
       </div>
       <div class="product-card-tags">
-        ${p.protein_g ? `<span class="product-tag">${p.protein_g}g proteína</span>` : ""}
+        ${p.protein_g != null ? `<span class="product-tag">${escapeHtml(p.protein_g)} g de proteína</span>` : ""}
         ${(p.claims || []).slice(0, 2).map(c => `<span class="product-tag">${escapeHtml(c)}</span>`).join("")}
       </div>
       <div class="product-card-actions">
-        <button class="product-ask-btn" type="button" data-product-name="${escapeHtml(p.name)}">
+        <button class="product-ask-btn" type="button">
           <i data-lucide="message-square-plus" class="ui-icon"></i>
           <span>Consultar este producto</span>
         </button>
       </div>
     </div>
-  `;
-  }).join("");
+  `).join("");
 
-  container.querySelectorAll(".product-ask-btn").forEach(btn => {
-    btn.onclick = () => {
-      const name = btn.dataset.productName;
-      if (name && onSelectProduct) {
-        onSelectProduct(name);
-      }
+  container.querySelectorAll(".product-card").forEach((card, index) => {
+    const product = products[index];
+    const image = card.querySelector("img");
+    const fallback = () => {
+      image.src = "/static/brand/alpina-logo.png";
+      image.classList.add("fallback-logo");
     };
+    const url = product.image_url || product.metadata?.image_url;
+    if (url) {
+      try {
+        const parsed = new URL(url, window.location.origin);
+        if (parsed.protocol === "https:" || (parsed.protocol === "http:" && parsed.origin === window.location.origin)) {
+          image.addEventListener("error", fallback, { once: true });
+          image.src = parsed.href;
+        } else {
+          fallback();
+        }
+      } catch {
+        fallback();
+      }
+    } else {
+      fallback();
+    }
+    card.querySelector(".product-ask-btn").addEventListener("click", () => onSelectProduct?.(product.name));
   });
 
   refreshIcons(container);
-}
-
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = String(text || "");
-  return div.innerHTML;
 }

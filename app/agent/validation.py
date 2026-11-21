@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from typing import Any, Iterable
 
 from app.agent.prompts import ABSTENTION, DEFAULT_CATEGORY_FILTERS
+from app.core.markdown import markdown_tree, spreadsheet_rows, unwrap_markdown
+from app.core.utils import ascii_fold, get_value, normalize_text
+from app.documents.catalog import DOCUMENT_ID_RE, resolve_document_ids
 
 VALID_CATEGORIES = {"product", "regulatory", "corporate", "general", "out_of_scope"}
 VALID_DOC_CATEGORIES = {"normative", "nutrition", "corporate", "guide"}
-DOCUMENT_ID_RE = re.compile(r"^[NPC]\d{1,2}$")
 CONVERSATIONAL_PATTERNS = {
     "greeting": re.compile(
         r"^[¿?¡!\s]*(hola|buenas|buen día|buenos días|buenas tardes|buenas noches|hey|qué tal|saludos)\b",
@@ -40,19 +41,9 @@ CONVERSATIONAL_PATTERNS = {
     ),
 }
 
-def _value(result: Any, key: str, default: Any = None) -> Any:
-    if isinstance(result, dict):
-        return result.get(key, default)
-    return getattr(result, key, default)
-
-
-def _normalize(text: Any) -> str:
-    return " ".join(str(text or "").split()).casefold()
-
-
 def _quote_matches(quote: str, content: str) -> bool:
-    normalized_quote = _normalize(quote)
-    normalized_content = _normalize(content)
+    normalized_quote = normalize_text(quote)
+    normalized_content = normalize_text(content)
     if normalized_quote and normalized_quote in normalized_content:
         return True
 
@@ -60,7 +51,7 @@ def _quote_matches(quote: str, content: str) -> bool:
     if (
         stripped_quote
         and stripped_quote != quote
-        and _normalize(stripped_quote) in normalized_content
+        and normalize_text(stripped_quote) in normalized_content
     ):
         return True
 
@@ -71,47 +62,9 @@ def _quote_matches(quote: str, content: str) -> bool:
     ]
     if len(fragments) > 1:
         return all(
-            _normalize(fragment) in normalized_content for fragment in fragments
+            normalize_text(fragment) in normalized_content for fragment in fragments
         )
     return False
-
-
-DOCUMENT_PATTERNS = [
-    (re.compile(r"\bley\s+2120\b"), "N1"),
-    (re.compile(r"\bresolucion\s+810\b"), "N2"),
-    (re.compile(r"\bresolucion\s+2492\b"), "N3"),
-    (re.compile(r"\bresolucion\s+2025013945\b"), "N4"),
-    (re.compile(r"\bresolucion\s+5109\b"), "N5"),
-    (re.compile(r"\bresolucion\s+333\b"), "N6"),
-    (re.compile(r"\bresolucion\s+2674\b"), "N7"),
-    (re.compile(r"\bnormograma\b"), "N8"),
-    (re.compile(r"\babece\b"), "N9"),
-    (re.compile(r"\bconsolidado\s+normativo\b"), "N10"),
-    (re.compile(r"\bpolitica\s+de\s+calidad\b"), "N11"),
-    (re.compile(r"\bportafolio\s+de\s+claims\b"), "P1"),
-    (re.compile(r"\bdefensis\b|\byox\b"), "P2"),
-    (re.compile(r"\balpi10\b"), "P3"),
-    (re.compile(r"\bbaby\s+gu\b|\balpina\s+baby\b"), "P4"),
-    (re.compile(r"\binforme\s+de\s+gestion\b"), "C1"),
-    (re.compile(r"\bsostenibilidad\b"), "C2"),
-    (re.compile(r"\binforme\s+bic\b"), "C3"),
-    (re.compile(r"\bestados\s+financieros\s+separados\b"), "C4"),
-    (re.compile(r"\bestados\s+financieros\s+consolidados\b"), "C5"),
-]
-
-
-def _ascii_lower(text: str) -> str:
-    normalized = unicodedata.normalize("NFKD", str(text or ""))
-    return normalized.encode("ascii", "ignore").decode("ascii").lower()
-
-
-def resolve_document_ids(query: str) -> list[str]:
-    normalized = _ascii_lower(query)
-    resolved = [token.upper() for token in re.findall(r"\b[npc]\d{1,2}\b", normalized)]
-    for pattern, document_id in DOCUMENT_PATTERNS:
-        if pattern.search(normalized) and document_id not in resolved:
-            resolved.append(document_id)
-    return list(dict.fromkeys(resolved))
 
 
 GUARDRAIL_JAILBREAK_RE = re.compile(
@@ -162,7 +115,7 @@ def detect_out_of_domain_or_jailbreak(query: str) -> str | None:
     q = query.strip()
     if GUARDRAIL_JAILBREAK_RE.search(q) or GUARDRAIL_MALICIOUS_RE.search(q):
         return GUARDRAIL_RESPONSE
-    if CODE_REQUEST_RE.search(_ascii_lower(q)):
+    if CODE_REQUEST_RE.search(ascii_fold(q).lower()):
         return SCOPE_RESPONSE
     return None
 
@@ -215,7 +168,7 @@ def validate_router_output(payload: dict, query: str) -> dict:
     document_ids = [
         str(item).strip().upper()
         for item in raw_document_ids
-        if DOCUMENT_ID_RE.match(str(item).strip().upper()) and str(item).strip().upper() in explicit_ids
+        if DOCUMENT_ID_RE.fullmatch(str(item).strip().upper()) and str(item).strip().upper() in explicit_ids
     ]
 
     search_query = str(payload.get("search_query") or "").strip()
@@ -255,12 +208,12 @@ def validate_citations(
                 continue
             result = result_list[source - 1]
             quote = str(citation.get("quote") or "").strip()
-            if quote and not _quote_matches(quote, _value(result, "content", "")):
+            if quote and not _quote_matches(quote, get_value(result, "content", "")):
                 quote = ""
                 issues.append("Se conservó la referencia de página porque el texto citado difiere del fragmento.")
             if matched_results is not None:
                 matched_results.append(result)
-            valid.append(_citation_for_result(result, int(_value(result, "page_start")), quote))
+            valid.append(_citation_for_result(result, int(get_value(result, "page_start")), quote))
             continue
 
         document_id = str(citation.get("document_id") or "").strip().upper()
@@ -276,15 +229,15 @@ def validate_citations(
 
         matches = []
         for result in result_list:
-            res_doc_id = str(_value(result, "document_id", "")).upper()
-            res_title = str(_value(result, "document_title", ""))
+            res_doc_id = str(get_value(result, "document_id", "")).upper()
+            res_title = str(get_value(result, "document_title", ""))
 
             # Coincidencia exacta de ID o título de documento
             id_match = bool(document_id and res_doc_id == document_id)
             title_match = bool(
                 citation_title
                 and not document_id
-                and _normalize(citation_title) == _normalize(res_title)
+                and normalize_text(citation_title) == normalize_text(res_title)
             )
 
             if id_match or title_match:
@@ -307,14 +260,14 @@ def validate_citations(
                 (
                     candidate
                     for candidate in matches
-                    if _quote_matches(quote, _value(candidate, "content", ""))
+                    if _quote_matches(quote, get_value(candidate, "content", ""))
                 ),
                 None,
             )
             if matching_result is not None:
                 matched_result = matching_result
                 try:
-                    page = int(_value(matched_result, "page_start", page))
+                    page = int(get_value(matched_result, "page_start", page))
                 except (TypeError, ValueError):
                     pass
             else:
@@ -326,8 +279,8 @@ def validate_citations(
             # Si es cita referencial sin frase, debe existir un fragmento que cubra esa página
             for candidate in matches:
                 try:
-                    page_start = int(_value(candidate, "page_start", 0))
-                    page_end = int(_value(candidate, "page_end", page_start))
+                    page_start = int(get_value(candidate, "page_start", 0))
+                    page_end = int(get_value(candidate, "page_end", page_start))
                 except (TypeError, ValueError):
                     continue
                 if page_start <= page <= page_end:
@@ -340,14 +293,14 @@ def validate_citations(
                 continue
             matched_result = page_matches[0]
 
-        result_version = str(_value(matched_result, "version", ""))
+        result_version = str(get_value(matched_result, "version", ""))
         if matched_results is not None:
             if quote:
                 matched_results.append(matched_result)
             else:
                 matched_results.extend(
                     result for result in page_matches
-                    if _value(result, "version", "") == result_version
+                    if get_value(result, "version", "") == result_version
                 )
 
         bound = _citation_for_result(matched_result, page, quote)
@@ -360,12 +313,13 @@ def validate_citations(
 
 def _citation_for_result(result: Any, page: int, quote: str) -> dict:
     return {
-        "document_id": str(_value(result, "document_id", "")).upper(),
-        "title": _value(result, "document_title", ""),
+        "kind": "product" if get_value(result, "doc_type") == "producto" else "document",
+        "document_id": str(get_value(result, "document_id", "")).upper(),
+        "title": get_value(result, "document_title", ""),
         "page": page,
-        "version": str(_value(result, "version") or ""),
+        "version": str(get_value(result, "version") or ""),
         "quote": quote,
-        "source_url": _value(result, "source_url"),
+        "source_url": get_value(result, "source_url"),
     }
 
 
@@ -404,7 +358,7 @@ def verify_claims_against_evidence(
         return ABSTENTION, True, ["Sin evidencia documental para verificar afirmaciones."]
 
     evidence_numbers = extract_numbers_from_text(" ".join(
-        str(_value(result, field) or "")
+        str(get_value(result, field) or "")
         for result in result_list
         for field in ("content", "document_title", "version")
     ))
@@ -413,7 +367,7 @@ def verify_claims_against_evidence(
 
     for line in answer.splitlines():
         valid_sentences = []
-        line = re.sub(r"[ \t]*\[FUENTE\s+\d+\]", "", line, flags=re.IGNORECASE)
+        line = re.sub(r"[ \t]*\[FUENTE\s+\d+\](?:\([^\n)]*\))?", "", line, flags=re.IGNORECASE)
         index = re.match(r"^\s*(?:#{1,6}\s+|\*\*)?\d+[.)]\s+", line)
         first_char = index.end() if index else 0
         for sentence in re.split(r"(?<=[.!?])(?=[ \t]+)", line[first_char:]):
@@ -436,7 +390,7 @@ def validate_answer_payload(payload: dict, results: Iterable[Any]) -> dict:
     if not isinstance(payload, dict):
         payload = {}
 
-    answer = str(payload.get("answer") or "").strip()
+    answer = unwrap_markdown(str(payload.get("answer") or "")).strip()
     raw_abstained = payload.get("abstained")
     if isinstance(raw_abstained, str):
         abstained = raw_abstained.strip().lower() == "true"
@@ -463,7 +417,7 @@ def validate_answer_payload(payload: dict, results: Iterable[Any]) -> dict:
             "issues": ["El modelo no entregó texto para la respuesta."],
         }
 
-    if _normalize(answer) == _normalize(ABSTENTION):
+    if normalize_text(answer) == normalize_text(ABSTENTION):
         return {
             "answer": ABSTENTION,
             "citations": [],
@@ -508,72 +462,101 @@ EXPLICIT_XLSX_RE = re.compile(
 )
 EXPLICIT_DOCX_RE = re.compile(r"\b(word|docx|doc)\b", re.IGNORECASE)
 FILE_ACTION_RE = re.compile(
-    r"\b(?:gen[eé]r|cr[eé]a|haz|elabor|export|descarg|saca|arma|baja|p[aá]sa|env[ií]a|dame|entreg|quiero|necesito|prep[aá]ra)\w*\b",
+    r"\b(?:gen[eé]r|cr[eé]a|haz|elabor|export|descarg|saca|arma|baja|p[aá]sa|env[ií]a|dame|"
+    r"entreg|quiero|necesito|prep[aá]ra|conviert|convert|transform|gu[aá]rd)\w*\b",
     re.IGNORECASE,
 )
 FILE_PREFIX_RE = re.compile(
-    r"^(?:(?:me|por\s+favor|puedes?|podr[ií]as?|un|una|el|la|los|las|en|a|de|al|del|para|sobre|con|"
-    r"formato|archivo|reporte|informe|documento|dossier|lo\s+anterior|lo\s+de\s+arriba)\b[\s,]*)+",
+    r"^(?:(?:me|por\s+favor|puedes?|podr[ií]as?|un|una|el|la|los|las|en|a|de|al|del|para|sobre|con|como|"
+    r"formato|archivo|reporte|informe|documento|dossier|completo|detallado|ejecutivo|descargable|"
+    r"lo\s+anterior|lo\s+de\s+arriba)\b[\s,]*)+",
     re.IGNORECASE,
 )
 FILE_REFERENCE_RE = re.compile(
-    r"^(?:(?:la\s+|el\s+|lo\s+)?(?:respuesta(?: anterior)?|texto anterior|tema anterior|anterior|"
-    r"que acabas de decir|lo que me dijiste|eso|esto|lo mismo|lo de arriba))$"
+    r"^(?:(?:la\s+|el\s+|lo\s+)?(?:respuesta|texto|tema|contenido|tabla|resumen|(?:misma\s+)?informacion|(?:mismos\s+)?datos)"
+    r"(?:\s+(?:anterior(?:es)?|que te (?:di|pase|comparti)))?"
+    r"|(?:el\s+)?ultimo\s+mensaje|(?:lo\s+)?anterior|que acabas de decir|lo que me dijiste|lo que te (?:di|pase|comparti)|"
+    r"eso|(?:todo\s+)?esto|lo mismo|lo de arriba)$"
 )
 FILE_TOPIC_CONNECTOR_RE = re.compile(r"^(?:(?:sobre|con|acerca\s+de|de|del|el|la|los|las)\b[\s,]*)+", re.IGNORECASE)
+OUTPUT_FORMAT_RE = re.compile(r"\b(?:en|a|como)(?:\s+(?:formato|archivos?|un|una))*\s*$", re.IGNORECASE)
+REPORT_DETAIL_RE = re.compile(r"\b(?:complet[oa]|detallad[oa]|exhaustiv[oa])\b", re.IGNORECASE)
+PROVIDED_CONTENT_RE = re.compile(
+    r"\b(?:(?:con|usando|a partir de|te comparto|te paso)\s+)?"
+    r"(?:estos (?:son los )?datos|esta informaci[oó]n|este (?:contenido|texto)|esta tabla|"
+    r"los siguientes datos|la siguiente (?:informaci[oó]n|tabla)|el siguiente (?:texto|contenido))"
+    r"[ \t]*(?::\s*|\n+)(?P<content>\S[\s\S]*)$",
+    re.IGNORECASE,
+)
+
+
+def provided_report_content(query: str) -> str:
+    text = query.strip(" \r\n")
+    match = PROVIDED_CONTENT_RE.match(text)
+    if match:
+        return match["content"].strip(" \r\n")
+    if "\t" in text and spreadsheet_rows(text):
+        return text
+    if "|" in text and "\n" in text:
+        blocks = markdown_tree(text).children
+        if any(block.type == "table" for block in blocks) and all(
+            block.type in {"heading", "table"} for block in blocks
+        ):
+            return text
+    return ""
 
 
 def detect_report_request(query: str) -> dict | None:
-    """Detecta de forma estricta si la consulta solicita generar un archivo PDF, Excel/XLSX o Word/DOCX.
-    
-    SOLO se activa si el usuario pide explícitamente un PDF, Excel o Word.
-    Consultas normales sobre informes documentales (como 'informe de gestión') NO activan la herramienta.
-    """
+    """Identifica un formato solicitado como entrega y extrae el tema o contenido."""
     if not query:
         return None
-    q = query.strip("¿?¡!. \t\n")
-    for report_type, pattern in (("docx", EXPLICIT_DOCX_RE), ("xlsx", EXPLICIT_XLSX_RE), ("pdf", EXPLICIT_PDF_RE)):
-        match = pattern.search(q)
-        if match:
-            break
-    else:
+    provided = PROVIDED_CONTENT_RE.search(query)
+    command = query[:provided.start()] if provided else query
+    content = provided["content"].strip(" \r\n") if provided else ""
+    if not content:
+        line, newline, remainder = command.partition("\n")
+        if newline and (content := provided_report_content(remainder)):
+            command = line
+    head, separator, trailing = command.partition(":")
+    q = head.strip("¿?¡!. \t\n")
+    formats = (("docx", EXPLICIT_DOCX_RE), ("xlsx", EXPLICIT_XLSX_RE), ("pdf", EXPLICIT_PDF_RE))
+    matches = [(match.start(), kind, match) for kind, pattern in formats if (match := pattern.search(q))]
+    if not matches:
         return None
+    _, report_type, match = min(matches, key=lambda item: item[0])
 
-    before = q[:match.start()].strip(" ,")
+    before = q[:match.start()].strip(" ,.")
     after = re.sub(r"\bpor\s+favor\s*$", "", q[match.end():], flags=re.IGNORECASE).strip(" ,")
     action = FILE_ACTION_RE.search(before)
-    prefix = FILE_PREFIX_RE.sub("", re.sub(r"\b(?:en|a)\s*$", "", before, flags=re.IGNORECASE).strip())
-    if not action and prefix and not FILE_REFERENCE_RE.fullmatch(_ascii_lower(prefix)):
+    prefix = FILE_PREFIX_RE.sub("", before)
+    if not action and prefix and not FILE_REFERENCE_RE.fullmatch(ascii_fold(prefix).lower()):
         return None
 
     if action:
-        before = before[action.end():].strip()
-    before = re.sub(r"\b(?:en|a)\s*$", "", before, flags=re.IGNORECASE).strip()
+        while action:
+            before = before[action.end():].strip(" ,.")
+            prefix = re.sub(r"^que\s+(?:(?:me|lo|la|nos)\s+)?", "", before, flags=re.IGNORECASE)
+            prefix = FILE_PREFIX_RE.sub("", prefix)
+            action = FILE_ACTION_RE.match(prefix)
+            before = prefix if action else before
+        if (
+            prefix
+            and not OUTPUT_FORMAT_RE.search(before)
+            and not FILE_REFERENCE_RE.fullmatch(ascii_fold(prefix).lower())
+        ):
+            return None
+    before = re.sub(r"\b(?:en|a|como)\s*$", "", before, flags=re.IGNORECASE).strip()
     topic = (FILE_TOPIC_CONNECTOR_RE.sub("", after) if after else FILE_PREFIX_RE.sub("", before)).strip(" ,")
-    if FILE_REFERENCE_RE.fullmatch(_ascii_lower(topic)):
+    if FILE_REFERENCE_RE.fullmatch(ascii_fold(topic).lower()):
         topic = ""
-    return {"report_type": report_type, "topic": topic}
 
-
-def validate_verifier_output(payload: dict) -> dict:
-    if not isinstance(payload, dict):
-        payload = {}
-
-    raw_approved = payload.get("approved")
-    if isinstance(raw_approved, str):
-        approved = raw_approved.strip().lower() == "true"
-    else:
-        approved = bool(raw_approved)
-
-    issues = payload.get("issues") or []
-    if not isinstance(issues, list):
-        issues = [str(issues)]
-
-    corrected = payload.get("corrected_answer")
-    corrected_answer = str(corrected).strip() if corrected else None
-
-    return {
-        "approved": approved,
-        "issues": [str(issue) for issue in issues],
-        "corrected_answer": corrected_answer,
-    }
+    if not content and separator and not topic:
+        content = trailing.strip(" \r\n") if trailing.strip() else ""
+    request = {"report_type": report_type, "topic": topic}
+    if not topic and not content and REPORT_DETAIL_RE.search(q):
+        request["detailed"] = True
+    if content:
+        request["content"] = content
+    elif trailing.strip():
+        request["topic"] = f"{topic.lstrip()}: {trailing.strip()}" if topic else trailing.strip()
+    return request

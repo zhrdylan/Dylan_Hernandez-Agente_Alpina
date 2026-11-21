@@ -51,14 +51,3 @@ export function closeDossierModal() {
   modal.classList.remove("open");
   modal.setAttribute("aria-hidden", "true");
 }
-
-export function openDossierModal(data) {
-  const genReport = data?.metadata?.generated_report || data?.generated_report || data;
-  if (genReport) {
-    openPdfPreviewModal(genReport);
-  }
-}
-
-export function switchDossierTab() {}
-export function loadPdfPreview() {}
-export function exportReportFromDossier() {}

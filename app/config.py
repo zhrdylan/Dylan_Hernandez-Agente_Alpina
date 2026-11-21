@@ -1,5 +1,7 @@
 from pathlib import Path
+from urllib.parse import urlsplit
 
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -49,12 +51,34 @@ class Settings(BaseSettings):
     r2_endpoint: str = ""
 
 
-    cors_allow_all: bool = True
+    cors_allow_all: bool = False
+    cors_allowed_origins: list[str] = Field(default_factory=list)
+    trusted_hosts: list[str] = Field(default_factory=lambda: ["localhost", "127.0.0.1", "[::1]"])
+    rate_limit_ip: str = "300/minute"
+    rate_limit_session: str = "120/minute"
+    rate_limit_storage_uri: str = "memory://"
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def validate_origins(cls, origins: list[str]) -> list[str]:
+        for origin in origins:
+            url = urlsplit(origin)
+            if (
+                url.scheme not in {"http", "https"} or not url.hostname
+                or url.username is not None or "*" in origin
+                or origin != f"{url.scheme}://{url.netloc}"
+            ):
+                raise ValueError("CORS_ALLOWED_ORIGINS debe contener orígenes HTTP(S) completos.")
+        return origins
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() == "production"
 
     def __repr__(self) -> str:
         masked = {}
         for k, v in self.__dict__.items():
-            if any(token in k.lower() for token in ("key", "url", "secret", "password")):
+            if any(token in k.lower() for token in ("key", "url", "secret", "password", "uri")):
                 masked[k] = "***" if v else ""
             else:
                 masked[k] = v

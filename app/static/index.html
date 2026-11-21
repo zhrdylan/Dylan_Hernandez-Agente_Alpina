@@ -2,25 +2,29 @@
 <html lang="es">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#0b1f3a" />
     <title>Agente Alpina · Documentos oficiales</title>
     <link rel="icon" type="image/png" href="/static/brand/favicon.png" />
-    <link rel="stylesheet" href="/static/css/main.css?v=20261106-01" />
+    <link rel="stylesheet" href="/static/css/main.css?v=20261121-01" />
     <script src="/static/js/vendor/lucide.min.js"></script>
   </head>
   <body>
     <div class="app-shell">
-      <aside class="sidebar">
+      <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+      <aside id="chat-sidebar" class="sidebar" aria-label="Conversaciones y recursos">
         <div class="brand">
           <img class="brand-logo" src="/static/brand/alpina-logo.png" alt="Alpina" />
           <div>
             <div class="brand-name">Agente Documental</div>
             <div class="brand-sub">Documentos y productos oficiales</div>
           </div>
+          <button id="sidebar-close" class="sidebar-close" type="button" aria-label="Cerrar menú">
+            <i data-lucide="x" class="ui-icon"></i>
+          </button>
         </div>
 
-        <button id="new-chat" class="new-chat" type="button">
+        <button id="new-chat" class="new-chat" type="button" disabled>
           <i data-lucide="plus-circle" class="ui-icon"></i>
           <span>Nuevo chat</span>
         </button>
@@ -34,30 +38,40 @@
             <i data-lucide="file-text" class="ui-icon"></i>
             <span>Documentos oficiales</span>
           </button>
-          <button id="clear-chats" class="sidebar-action sidebar-danger" type="button">
-            <i data-lucide="trash-2" class="ui-icon"></i>
-            <span>Vaciar conversaciones</span>
-          </button>
         </div>
 
-        <div class="sidebar-section">
-          <div class="sidebar-heading">Conversaciones</div>
-          <div id="chat-list" class="chat-list"></div>
-        </div>
+        <section class="sidebar-section" aria-labelledby="sidebar-heading">
+          <div class="sidebar-section-header">
+            <h2 id="sidebar-heading" class="sidebar-heading">Conversaciones</h2>
+            <button id="select-chats" class="sidebar-select" type="button" aria-controls="chat-list" disabled>
+              Seleccionar
+            </button>
+          </div>
+          <button id="delete-selected-chats" class="sidebar-delete" type="button" hidden disabled>
+            <i data-lucide="trash" class="ui-icon"></i>
+            <span>Eliminar selección</span>
+          </button>
+          <div id="chat-list" class="chat-list" aria-busy="true">
+            <div class="history-placeholder skeleton" aria-hidden="true"></div>
+            <div class="history-placeholder skeleton" aria-hidden="true"></div>
+            <div class="history-placeholder skeleton" aria-hidden="true"></div>
+          </div>
+        </section>
 
         <div class="sidebar-footer">
           <div id="corpus-stats" class="corpus-stats">
             <i data-lucide="database" class="ui-icon"></i>
             <span>Cargando corpus...</span>
           </div>
-          <p class="sidebar-note">
-            Recuperación 100% semántica (Cohere + pgvector). Cero alucinación.
-          </p>
         </div>
       </aside>
 
       <main class="chat-panel">
         <header class="chat-header">
+          <button id="sidebar-toggle" class="ghost-button sidebar-toggle" type="button"
+            aria-label="Abrir menú de conversaciones" aria-controls="chat-sidebar" aria-expanded="false">
+            <i data-lucide="menu" class="ui-icon"></i>
+          </button>
           <div class="chat-heading">
             <h1 id="chat-title">Nuevo chat</h1>
             <p id="chat-subtitle" class="chat-subtitle">
@@ -69,20 +83,37 @@
               <i data-lucide="loader-2" class="ui-icon spin"></i>
               <span>Conectando...</span>
             </span>
-            <button id="delete-chat" class="ghost-button" type="button" title="Eliminar conversación actual">
+            <button id="delete-chat" class="ghost-button" type="button" title="Eliminar conversación actual" disabled>
               <i data-lucide="trash" class="ui-icon"></i>
               <span>Eliminar</span>
             </button>
           </div>
         </header>
 
-        <section id="messages" class="messages" aria-live="polite">
+        <section id="messages" class="messages" aria-live="polite" aria-busy="true"></section>
+        <template id="chat-loading-template">
+          <div class="message message-user" aria-hidden="true">
+            <div class="message-avatar skeleton"></div>
+            <div class="message-bubble skeleton-bubble skeleton-user">
+              <div class="skeleton skeleton-line"></div>
+            </div>
+          </div>
+          <div class="message message-assistant" aria-hidden="true">
+            <div class="message-avatar skeleton"></div>
+            <div class="message-bubble skeleton-bubble">
+              <div class="skeleton skeleton-line"></div>
+              <div class="skeleton skeleton-line"></div>
+              <div class="skeleton skeleton-line"></div>
+            </div>
+          </div>
+        </template>
+        <template id="welcome-template">
           <div class="empty-state" id="empty-state">
             <img class="empty-logo" src="/static/brand/alpina-logo.png" alt="Alpina" />
             <h2>¿Qué necesitas consultar?</h2>
             <p>
-              Pregunta sobre leyes, resoluciones, productos, etiquetado, calidad o
-              información corporativa. Cada respuesta incluirá documento, página y versión.
+              Consulta sobre productos, etiquetado o información corporativa de Alpina.
+              Puedes pedir un informe en PDF, Word o Excel desde el chat.
             </p>
             <div class="examples" id="examples">
               <button class="example" type="button" data-question="¿Qué exige la Resolución 810 de 2021 sobre etiquetado frontal?">
@@ -107,16 +138,17 @@
               </button>
             </div>
           </div>
-        </section>
+        </template>
 
         <form id="composer" class="composer" autocomplete="off">
           <textarea
             id="message-input"
             rows="1"
-            placeholder="Escribe tu pregunta sobre normativa o productos..."
+            enterkeyhint="send"
+            placeholder="Escribe tu pregunta..."
             aria-label="Pregunta"
           ></textarea>
-          <button id="send-button" type="submit">
+          <button id="send-button" type="submit" disabled>
             <span>Enviar</span>
             <i data-lucide="send" class="ui-icon"></i>
           </button>
@@ -126,6 +158,7 @@
         </p>
       </main>
     </div>
+    <p id="chat-notice" class="chat-notice" role="status"></p>
 
     <!-- Modal Catálogo de Productos -->
     <div id="catalog-modal" class="modal" aria-hidden="true">
@@ -143,7 +176,7 @@
         <div class="catalog-toolbar">
           <div class="modal-search-wrapper">
             <i data-lucide="search" class="ui-icon search-icon"></i>
-            <input id="product-search" class="modal-search" type="search" placeholder="Buscar por nombre, EAN, SKU o claims..." />
+            <input id="product-search" class="modal-search" type="search" aria-label="Buscar productos" placeholder="Buscar por nombre, EAN, SKU o claims..." />
           </div>
           <span id="product-total" class="catalog-total">Cargando catálogo...</span>
         </div>
@@ -187,14 +220,13 @@
           </div>
           <div class="preview-info">
             <h3 class="preview-info-title">Trazabilidad de Cita</h3>
-            <div id="preview-quote" class="preview-quote-box"></div>
             <p style="font-size: 0.75rem; color: var(--muted); margin: 0;">
               El resaltado tenue y contorneado corresponde a la coincidencia textual auditada en el documento oficial.
             </p>
           </div>
         </div>
         <div class="preview-toolbar">
-          <div style="display: flex; align-items: center; gap: 8px;">
+          <div class="preview-pagination">
             <button id="preview-prev-btn" class="ghost-button" type="button" aria-label="Página anterior">
               <i data-lucide="chevron-left" class="ui-icon"></i>
               <span>Anterior</span>
@@ -276,7 +308,8 @@
 
     <!-- Live Citation Inspector (Side Drawer) -->
     <div id="citation-drawer-backdrop" class="citation-drawer-backdrop" aria-hidden="true"></div>
-    <aside id="citation-drawer" class="citation-drawer" aria-hidden="true" aria-label="Inspector de Citas">
+    <aside id="citation-drawer" class="citation-drawer" role="dialog" aria-modal="true"
+      aria-hidden="true" aria-labelledby="drawer-doc-title" inert>
       <header class="drawer-header">
         <div>
           <h3 id="drawer-doc-title">Evidencia Documental</h3>
@@ -299,17 +332,18 @@
           <p id="drawer-quote-text" class="drawer-quote-text"></p>
         </div>
 
-        <div class="drawer-page-view" id="drawer-page-view-wrapper">
-          <div id="drawer-page-spinner" class="preview-spinner" style="display: none; position: absolute;"></div>
-          <img id="drawer-page-img" class="drawer-page-img" src="" alt="Página del documento oficial" />
+        <div class="drawer-page-view" id="drawer-page-view-wrapper" aria-busy="true">
+          <div id="drawer-page-skeleton" class="drawer-page-skeleton skeleton" aria-hidden="true"></div>
+          <img id="drawer-page-img" class="drawer-page-img" alt="Vista previa de la fuente oficial" hidden />
         </div>
-        <p id="drawer-hint" class="drawer-hint">
-          El recuadro amarillo resalta la coincidencia exacta de la cita en el PDF oficial original.
-        </p>
+        <p id="drawer-hint" class="drawer-hint" role="status"></p>
+        <a id="drawer-product-link" class="drawer-source-link" target="_blank" rel="noopener noreferrer" hidden>
+          <i data-lucide="external-link" class="ui-icon"></i> Abrir en Alpina
+        </a>
       </div>
     </aside>
 
     <!-- Script Principal como ES Module -->
-    <script type="module" src="/static/js/main.js?v=20261106-01"></script>
+    <script type="module" src="/static/js/main.js?v=20261121-01"></script>
   </body>
 </html>

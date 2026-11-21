@@ -266,46 +266,6 @@ def first_chunks_for_documents(
     ]
 
 
-def semantic_search(
-    conn: psycopg.Connection,
-    query: str,
-    *,
-    filters: SearchFilters | None = None,
-    limit: int = 12,
-    min_similarity: float = 0.25,
-    embed_fn: Callable[[str], list[float]] = embed_query,
-) -> list[SearchResult]:
-    """Búsqueda semántica vectorial usando embeddings de Cohere y pgvector."""
-    query = query.strip()
-    if not query:
-        return []
-
-    filters = filters or SearchFilters()
-    query_vector = embed_fn(query)
-    query_literal = vector_literal(query_vector)
-
-    raw_rows = _vector_rows(conn, query_literal, filters, limit=limit * 2)
-    results: list[SearchResult] = []
-    for rank, row in enumerate(raw_rows, start=1):
-        score = float(row["vector_score"])
-        if score < min_similarity:
-            continue
-        common = _common_fields(row)
-        results.append(
-            SearchResult(
-                **common,
-                vector_score=score,
-                vector_rank=rank,
-                fts_score=None,
-                fts_rank=None,
-                rrf_score=score,
-            )
-        )
-        if len(results) >= limit:
-            break
-    return results
-
-
 def coverage_search(
     conn: psycopg.Connection,
     query: str,
@@ -317,11 +277,14 @@ def coverage_search(
     min_similarity: float = 0.25,
 ) -> list[SearchResult]:
     active_filters = filters or SearchFilters()
+    focused_results: list[SearchResult] = []
     if active_filters.focus_query:
         with conn.transaction():
             focused = _fts_rows(conn, query, active_filters, limit=4)
         if focused:
-            return reciprocal_rank_fusion([], focused, limit=base_limit)
+            focused_results = reciprocal_rank_fusion([], focused, limit=base_limit)
+            if not active_filters.coverage:
+                return focused_results
         active_filters = replace(active_filters, focus_query=None)
 
     base = hybrid_search(
@@ -335,6 +298,10 @@ def coverage_search(
     )
     if not active_filters.coverage:
         return base
+
+    if focused_results:
+        focused_ids = {result.chunk_id for result in focused_results}
+        base = [*focused_results, *(result for result in base if result.chunk_id not in focused_ids)][:base_limit]
 
     seen = {result.document_id for result in base}
     extra = first_chunks_for_documents(

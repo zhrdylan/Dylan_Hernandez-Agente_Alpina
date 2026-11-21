@@ -25,7 +25,7 @@ def test_official_document_titles():
 
 
 def test_list_documents_api():
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://localhost")
     resp = client.get("/api/documents")
     assert resp.status_code == 200
     docs = resp.json()
@@ -37,7 +37,7 @@ def test_list_documents_api():
 
 
 def test_download_document_pdf_api():
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://localhost")
     resp = client.get("/api/documents/C4/pdf")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/pdf"

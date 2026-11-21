@@ -76,9 +76,10 @@ def test_generate_all_three_report_formats(tmp_path):
 def test_api_generate_and_download_docx_report():
     from app.core.crypto import encrypt_text
     from app.db.connection import connect
+    from app.api.deps import derive_owner_id
     from psycopg.types.json import Jsonb
 
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://localhost")
     sess_id = f"sess-test-{uuid.uuid4().hex[:8]}"
 
     # Create chat
@@ -88,7 +89,7 @@ def test_api_generate_and_download_docx_report():
 
     try:
         # Insert messages into DB (encrypted)
-        with connect() as conn:
+        with connect(session_id=derive_owner_id(sess_id)) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
