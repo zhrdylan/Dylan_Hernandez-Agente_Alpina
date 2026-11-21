@@ -23,3 +23,6 @@ data/.dev_chat_key
 *.pem
 *.p12
 *.pfx
+.vercel
+.env*
+!.env.example
