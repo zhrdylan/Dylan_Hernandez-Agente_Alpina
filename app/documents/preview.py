@@ -4,7 +4,9 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
+import tempfile
 import textwrap
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -22,8 +24,9 @@ from app.documents.catalog import DOCUMENT_ID_RE, OFFICIAL_DOCUMENT_TITLES
 from app.storage.r2 import R2Storage
 
 LOCK_PATH = BASE_DIR / "data" / "manifest.lock.json"
-CACHE_DIR = BASE_DIR / "data" / "cache" / "pages"
-DOCUMENT_CACHE_DIR = BASE_DIR / "data" / "cache" / "documents"
+_CACHE_BASE = Path(tempfile.gettempdir()) / "alpina_cache" if os.environ.get("VERCEL") else BASE_DIR / "data" / "cache"
+CACHE_DIR = _CACHE_BASE / "pages"
+DOCUMENT_CACHE_DIR = _CACHE_BASE / "documents"
 PREVIEW_DPI = 150
 _VERSION = re.compile(r"[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*")
 logger = logging.getLogger(__name__)

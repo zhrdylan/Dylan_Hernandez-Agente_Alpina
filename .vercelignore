@@ -1,0 +1,11 @@
+.venv
+__pycache__
+*.pyc
+.git
+.cache
+data/cache
+data/reports
+tests
+.pytest_cache
+iniciar.bat
+.superpowers

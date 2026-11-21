@@ -1,3 +1,5 @@
+import os
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -5,11 +7,20 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-RAW_DIR = DATA_DIR / "raw"
-PROCESSED_DIR = DATA_DIR / "processed"
-REPORTS_DIR = DATA_DIR / "reports"
-CACHE_DIR = BASE_DIR / ".cache"
+
+if os.environ.get("VERCEL"):
+    _TEMP_DIR = Path(tempfile.gettempdir())
+    DATA_DIR = _TEMP_DIR / "data"
+    RAW_DIR = DATA_DIR / "raw"
+    PROCESSED_DIR = DATA_DIR / "processed"
+    REPORTS_DIR = _TEMP_DIR / "reports"
+    CACHE_DIR = _TEMP_DIR / ".cache"
+else:
+    DATA_DIR = BASE_DIR / "data"
+    RAW_DIR = DATA_DIR / "raw"
+    PROCESSED_DIR = DATA_DIR / "processed"
+    REPORTS_DIR = DATA_DIR / "reports"
+    CACHE_DIR = BASE_DIR / ".cache"
 
 
 class Settings(BaseSettings):
@@ -53,7 +64,13 @@ class Settings(BaseSettings):
 
     cors_allow_all: bool = False
     cors_allowed_origins: list[str] = Field(default_factory=list)
-    trusted_hosts: list[str] = Field(default_factory=lambda: ["localhost", "127.0.0.1", "[::1]"])
+    trusted_hosts: list[str] = Field(
+        default_factory=lambda: (
+            ["localhost", "127.0.0.1", "[::1]", "*.vercel.app", "*"]
+            if os.environ.get("VERCEL")
+            else ["localhost", "127.0.0.1", "[::1]", "*.vercel.app"]
+        )
+    )
     rate_limit_ip: str = "300/minute"
     rate_limit_session: str = "120/minute"
     rate_limit_storage_uri: str = "memory://"
@@ -89,5 +106,8 @@ settings = Settings()
 
 
 def ensure_project_dirs() -> None:
-    for directory in (DATA_DIR, RAW_DIR, PROCESSED_DIR, REPORTS_DIR, CACHE_DIR):
-        directory.mkdir(parents=True, exist_ok=True)
+    try:
+        for directory in (DATA_DIR, RAW_DIR, PROCESSED_DIR, REPORTS_DIR, CACHE_DIR):
+            directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
