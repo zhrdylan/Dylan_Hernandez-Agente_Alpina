@@ -14,6 +14,8 @@ echo.
 set "VENV_DIR=%~dp0.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 set "VENV_ACTIVATE=%VENV_DIR%\Scripts\activate.bat"
+:: Mantener este rango sincronizado con requires-python en pyproject.toml.
+set "ALPINA_PYTHON_CHECK=import sys; sys.exit(0 if (3, 12) <= sys.version_info[:2] < (3, 15) else 1)"
 
 :: -------------------------------------------------------------------------
 :: 1. Verificar si ya existe un entorno virtual valido y funcional
@@ -26,6 +28,16 @@ if %errorlevel% neq 0 (
     echo [INFO] Limpiando entorno anterior para recrearlo limpiamente...
     rmdir /s /q "%VENV_DIR%" >nul 2>&1
     goto check_system_python
+)
+
+"%VENV_PY%" -c "%ALPINA_PYTHON_CHECK%" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] El entorno .venv usa una version de Python incompatible:
+    "%VENV_PY%" --version
+    echo Este proyecto admite Python 3.12, 3.13 y 3.14.
+    echo Renombra la carpeta .venv y vuelve a ejecutar iniciar.bat.
+    pause
+    exit /b 1
 )
 
 echo [OK] Entorno virtual existente detectado y funcional:
@@ -45,43 +57,49 @@ echo [INFO] Buscando interprete de Python en el sistema...
 set "SYS_PYTHON="
 
 :: Probar 'py -3' (Python Launcher estandar de Windows)
-py -3 -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+py -3 -c "%ALPINA_PYTHON_CHECK%" >nul 2>&1
 if %errorlevel% equ 0 (
     set "SYS_PYTHON=py -3"
     goto python_found
 )
 
 :: Probar 'python' en PATH
-python -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+python -c "%ALPINA_PYTHON_CHECK%" >nul 2>&1
 if %errorlevel% equ 0 (
     set "SYS_PYTHON=python"
     goto python_found
 )
 
 :: Probar 'py' generico
-py -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+py -c "%ALPINA_PYTHON_CHECK%" >nul 2>&1
 if %errorlevel% equ 0 (
     set "SYS_PYTHON=py"
     goto python_found
 )
 
+:: Probar versiones concretas si el lanzador selecciona otra version por defecto.
+for %%V in (3.14 3.13 3.12) do (
+    py -%%V -c "%ALPINA_PYTHON_CHECK%" >nul 2>&1
+    if !errorlevel! equ 0 (
+        set "SYS_PYTHON=py -%%V"
+        goto python_found
+    )
+)
+
 :: Buscar en rutas de instalacion comunes de Windows
 for %%P in (
+    "%LOCALAPPDATA%\Programs\Python\Python314\python.exe"
     "%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
     "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
-    "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-    "%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
+    "%ProgramFiles%\Python314\python.exe"
     "%ProgramFiles%\Python313\python.exe"
     "%ProgramFiles%\Python312\python.exe"
-    "%ProgramFiles%\Python311\python.exe"
-    "%ProgramFiles%\Python310\python.exe"
+    "C:\Python314\python.exe"
     "C:\Python313\python.exe"
     "C:\Python312\python.exe"
-    "C:\Python311\python.exe"
-    "C:\Python310\python.exe"
 ) do (
     if exist %%P (
-        %%P -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+        %%P -c "%ALPINA_PYTHON_CHECK%" >nul 2>&1
         if !errorlevel! equ 0 (
             set "SYS_PYTHON="%%~P""
             goto python_found
@@ -92,12 +110,12 @@ for %%P in (
 :: Si no se encontro ningun Python
 echo.
 echo ========================================================================
-echo  [ERROR] No se encontro Python 3.10 o superior en tu computador.
+echo  [ERROR] No se encontro Python 3.12, 3.13 o 3.14 en tu computador.
 echo ========================================================================
 echo  Este proyecto requiere Python para poder ejecutarse.
 echo.
 echo  Pasos para solucionarlo:
-echo   1. Descarga Python (version recomendada 3.12 o 3.13) desde:
+echo   1. Descarga Python 3.12, 3.13 o 3.14 desde:
 echo      https://www.python.org/downloads/
 echo   2. AL INSTALAR: En la primera ventana del instalador, marca la casilla:
 echo      [X] "Add python.exe to PATH"
