@@ -1,5 +1,6 @@
 # 🥛 Agente RAG Corporativo Alpina
 
+[![Vercel Deployment](https://img.shields.io/badge/Vercel-Deployed-000000.svg?logo=vercel&logoColor=white)](https://dylan-hernandez-agente-alpina.vercel.app/)
 [![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.2+-orange.svg)](https://langchain-ai.github.io/langgraph/)
@@ -8,6 +9,7 @@
 [![Cohere](https://img.shields.io/badge/Cohere-Embed%20v3.0-39594C.svg)](https://cohere.com/)
 [![Cloudflare R2](https://img.shields.io/badge/Cloudflare-R2%20Storage-F38020.svg?logo=cloudflare&logoColor=white)](https://www.cloudflare.com/products/r2/)
 
+> 🌐 **URL de Producción en Vivo**: **[https://dylan-hernandez-agente-alpina.vercel.app](https://dylan-hernandez-agente-alpina.vercel.app)**  
 > **Proyecto Desarrollado por**: Dylan Hernández  
 > **Área / Asignatura**: Módulo de Inteligencia Artificial  
 > **Sistema**: Asistente RAG Multi-Agente Corporativo con Trazabilidad Auditable y Generación de Reportes
