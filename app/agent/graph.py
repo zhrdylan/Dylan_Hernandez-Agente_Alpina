@@ -513,7 +513,7 @@ def create_postgres_checkpointer() -> tuple[PostgresSaver, ConnectionPool]:
         conninfo=settings.database_url,
         min_size=1,
         max_size=5,
-        kwargs={"autocommit": True, "prepare_threshold": 0},
+        kwargs={"autocommit": True, "prepare_threshold": None},
         open=False,
     )
     try:

@@ -54,7 +54,7 @@ def _get_pool() -> ConnectionPool:
                 timeout=15,
                 kwargs={
                     "connect_timeout": 15,
-                    "prepare_threshold": 0,
+                    "prepare_threshold": None,
                 },
                 configure=_configure,
                 open=False,
